@@ -14,7 +14,11 @@ namespace OmiyaFes2026.Pose
         /// </summary>
         public static Quaternion IosToUnity(Quaternion ios)
         {
-            // X軸・W軸を反転することで右手系→左手系へ変換
+            // ── 座標系変換の考え方 ──────────────────────────────
+            // 右手系から左手系への変換は「Z軸を反転」することで行う。
+            // クォータニオン (x, y, z, w) で Z 軸を反転するには
+            // X 成分と W 成分を反転する（数学的等価変換）。
+            // 結果: (-x, y, z, -w)
             return new Quaternion(-ios.x, ios.y, ios.z, -ios.w);
         }
     }
