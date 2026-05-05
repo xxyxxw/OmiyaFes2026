@@ -37,9 +37,9 @@ namespace OmiyaFes2026
         [Header("弾のサイズ")]
         [SerializeField] private float bulletScale = 0.2f;
 
-        [Header("インク塗り半径（ワールド空間・メートル）")]
-        [Tooltip("弾が当たった中心からこの半径（メートル）分だけインクが塗られる")]
-        [SerializeField] private float brushWorldRadius = 0.5f;
+        [Header("インク塗りブラシ半径（ピクセル単位）")]
+        [Tooltip("弾が当たった中心から何ピクセル塗るか（例: 8 → 直径16px）")]
+        [SerializeField] [Range(1, 64)] private int brushPixelRadius = 8;
 
         // ────────────────────────────────────────────────────────────
         // 内部参照・状態
@@ -154,8 +154,7 @@ namespace OmiyaFes2026
             // ── InkBullet を付与して発射 ──────────────────────────
             var bullet = bulletGo.GetComponent<InkBullet>();
             if (bullet == null) bullet = bulletGo.AddComponent<InkBullet>();
-            // brushWorldRadius を渡すことで InkGun の Inspector 値が塗り範囲に反映される
-            bullet.Initialize(direction, inkColor, brushWorldRadius);
+            bullet.Initialize(direction, inkColor, brushPixelRadius);
         }
     }
 }

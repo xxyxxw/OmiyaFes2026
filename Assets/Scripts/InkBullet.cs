@@ -6,6 +6,11 @@ namespace OmiyaFes2026
     /// インク弾の飛翔・当たり判定・ペイント処理。
     /// InkGun から生成後に Initialize() を呼ぶ。
     /// OnTriggerEnter で PaintTarget に命中したら UV 座標を取得してインクを塗る。
+    ///
+    /// ▼ 設計方針
+    ///   - MeshCollider に対して Raycast して hit.textureCoord を取得
+    ///   - PaintTarget.Paint(uv, color, pixelRadius) を呼ぶ
+    ///   - brushPixelRadius で塗るサイズを直接ピクセル単位で指定（例: 8 = 直径16px）
     /// </summary>
     public class InkBullet : MonoBehaviour
     {
@@ -13,18 +18,20 @@ namespace OmiyaFes2026
         // インスペクター設定フィールド
         // ────────────────────────────────────────────────────────────
 
-        [SerializeField] private float speed            = 20f;  // 弾の飛ぶ速さ（Units/秒）
-        [SerializeField] private float lifetime         = 3f;   // 生成からこの秒数が経つと自動で消える
-        [SerializeField] private float brushWorldRadius = 0.5f; // 着弾時のブラシ半径（ワールド空間・メートル単位）
+        [SerializeField] private float speed            = 20f; // 弾の速さ（Units/秒）
+        [SerializeField] private float lifetime         = 3f;  // 自動消滅までの秒数
+
+        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 8 → 直径16px）")]
+        [SerializeField] [Range(1, 64)] private int brushPixelRadius = 8;
 
         // ────────────────────────────────────────────────────────────
         // 内部状態
         // ────────────────────────────────────────────────────────────
 
-        private Vector3 _direction;          // 飛翔方向（正規化済み）
-        private Color   _color;              // この弾のインク色
+        private Vector3 _direction;
+        private Color   _color;
         private bool    _initialized = false;
-        private bool    _hasHit      = false; // 多重ヒット防止フラグ
+        private bool    _hasHit      = false;
 
         // ────────────────────────────────────────────────────────────
         // 公開メソッド
@@ -33,11 +40,11 @@ namespace OmiyaFes2026
         /// <summary>
         /// InkGun から Instantiate 直後に呼ぶ初期化メソッド。
         /// </summary>
-        public void Initialize(Vector3 direction, Color inkColor, float worldRadius = 0.5f)
+        public void Initialize(Vector3 direction, Color inkColor, int pixelRadius = 8)
         {
             _direction       = direction.normalized;
             _color           = inkColor;
-            brushWorldRadius = worldRadius; // InkGun の Inspector 値で上書き
+            brushPixelRadius = pixelRadius;
             _initialized     = true;
             Destroy(gameObject, lifetime);
         }
@@ -49,8 +56,6 @@ namespace OmiyaFes2026
         private void Update()
         {
             if (!_initialized) return;
-
-            // ワールド空間で direction 方向へ毎フレーム移動
             transform.Translate(_direction * speed * Time.deltaTime, Space.World);
         }
 
@@ -58,44 +63,40 @@ namespace OmiyaFes2026
         /// Trigger Collider が別の Collider に触れたとき呼ばれる。
         /// PaintTarget を持つオブジェクトなら UV を取得してインクを塗る。
         /// ※ InkBullet 自身は SphereCollider (isTrigger=true) + Rigidbody(kinematic) を持つ。
-        /// ※ 対象オブジェクトは MeshCollider(non-convex, non-trigger) + Rigidbody(kinematic)。
+        /// ※ 対象オブジェクトは MeshCollider(non-convex, non-trigger) を持つ。
         /// </summary>
         private void OnTriggerEnter(Collider other)
         {
-            // 多重ヒット防止
             if (_hasHit) return;
 
-            // PaintTarget を持つオブジェクトかチェック
             var paintTarget = other.GetComponent<PaintTarget>();
             if (paintTarget == null) return;
 
             _hasHit = true;
 
-            // MeshCollider に対して Ray を飛ばして UV 座標を取得
+            // MeshCollider に Raycast して UV 座標を取得
             var meshCol = other as MeshCollider;
             if (meshCol == null)
                 meshCol = other.GetComponent<MeshCollider>();
 
             if (meshCol != null)
             {
-                // 弾の少し後ろから前方に向けて Ray を飛ばす
                 Ray ray = new Ray(transform.position - _direction * 0.5f, _direction);
 
                 if (meshCol.Raycast(ray, out RaycastHit hit, 2f))
                 {
-                    // ワールド空間の半径を渡す（PaintTarget 内で UV 半径に変換される）
-                    paintTarget.Paint(hit.textureCoord, _color, brushWorldRadius);
-                    Debug.Log($"[InkBullet] 命中！UV={hit.textureCoord} color={_color} worldR={brushWorldRadius}");
+                    // 着弾 UV 座標をそのまま渡す（ピクセル半径は brushPixelRadius）
+                    paintTarget.Paint(hit.textureCoord, _color, brushPixelRadius);
+                    Debug.Log($"[InkBullet] 命中！UV={hit.textureCoord} color={_color} pixelR={brushPixelRadius}");
                 }
                 else
                 {
-                    // Ray が当たらなかった場合は中心 UV にフォールバック
-                    paintTarget.Paint(new Vector2(0.5f, 0.5f), _color, brushWorldRadius);
+                    // Raycast 失敗時は中心にフォールバック
+                    paintTarget.Paint(new Vector2(0.5f, 0.5f), _color, brushPixelRadius);
                     Debug.Log("[InkBullet] UV取得失敗 → 中心に塗る（フォールバック）");
                 }
             }
 
-            // 弾を即削除
             Destroy(gameObject);
         }
     }

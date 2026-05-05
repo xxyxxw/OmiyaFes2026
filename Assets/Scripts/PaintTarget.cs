@@ -6,6 +6,10 @@ namespace OmiyaFes2026
     /// 流れてくるオブジェクト1個に付属するペイントコンポーネント。
     /// Awake で自分専用の RenderTexture を生成し、Paint() でインクを描く。
     /// InkBullet から直接呼ばれる。
+    ///
+    /// ▼ 設計方針（着弾地点から数ピクセル塗る）
+    ///   - brushPixelRadius: テクスチャ上のピクセル半径で直接指定（ワールドサイズ依存しない）
+    ///   - InkBullet は hit.textureCoord を取得して Paint(uv, color) を呼ぶだけ
     /// </summary>
     public class PaintTarget : MonoBehaviour
     {
@@ -13,8 +17,11 @@ namespace OmiyaFes2026
         // インスペクター設定
         // ────────────────────────────────────────────────────────────
 
-        [SerializeField] private int   textureSize       = 512;  // テクスチャ解像度
-        [SerializeField] private float brushWorldRadius = 0.5f; // デフォルトブラシ半径（ワールド空間・メートル単位）
+        [Tooltip("ペイントテクスチャの解像度（例: 512）")]
+        [SerializeField] private int textureSize = 512;
+
+        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 8 なら直径16px）")]
+        [SerializeField] [Range(1, 64)] private int brushPixelRadius = 8;
 
         // ────────────────────────────────────────────────────────────
         // 内部フィールド
@@ -28,19 +35,15 @@ namespace OmiyaFes2026
 
         private void Awake()
         {
-            // RenderTexture を生成
             _paintTexture = new RenderTexture(textureSize, textureSize, 0, RenderTextureFormat.ARGB32);
             _paintTexture.name = $"PaintTex_{gameObject.GetInstanceID()}";
             _paintTexture.Create();
 
-            // 全透明でリセット
             ClearTexture();
 
-            // このオブジェクトの Renderer マテリアルに適用
             var r = GetComponent<Renderer>();
             if (r != null)
             {
-                // sharedMaterial を変えないようインスタンスを複製してから上書き
                 r.material = new Material(r.sharedMaterial);
                 r.material.mainTexture = _paintTexture;
             }
@@ -48,7 +51,6 @@ namespace OmiyaFes2026
 
         private void OnDestroy()
         {
-            // GPU リソース解放
             if (_paintTexture != null)
                 _paintTexture.Release();
         }
@@ -59,42 +61,23 @@ namespace OmiyaFes2026
 
         /// <summary>
         /// UV 座標にインクを塗る。InkBullet.OnTriggerEnter から呼ばれる。
-        /// worldRadius：ワールド空間での塗り半径（メートル）。0以下はデフォルト値を使用。
-        /// 内部で Renderer.bounds を参照してUV空間の半径に自動変換する。
         /// </summary>
-        public void Paint(Vector2 uv, Color color, float worldRadius = 0f)
+        /// <param name="uv">着弾 UV 座標（0〜1）</param>
+        /// <param name="color">インク色</param>
+        /// <param name="pixelRadiusOverride">0以下なら Inspector の brushPixelRadius を使用</param>
+        public void Paint(Vector2 uv, Color color, int pixelRadiusOverride = 0)
         {
-            float wr = worldRadius > 0f ? worldRadius : brushWorldRadius;
-
-            // ── ワールド半径 → UV 半径 変換 ──────────────────────
-            // オブジェクトの XZ 方向の実寸（ワールド空間）を取得し、
-            // worldRadius ÷ objectSize = uvRadius と近似する。
-            // 例: 1m サイズのオブジェクトで worldRadius=0.5 → uvRadius=0.5 (テクスチャの半分)
-            float uvRadius = 0.1f; // フォールバック値
-            var rend = GetComponent<Renderer>();
-            if (rend != null)
-            {
-                // bounds.size はワールドスケール込みのサイズ
-                // X と Z の大きい方を基準（横・奥行き方向のスケールに合わせる）
-                float boundsSize = Mathf.Max(rend.bounds.size.x, rend.bounds.size.z);
-                if (boundsSize > 0f)
-                    uvRadius = wr / boundsSize;
-            }
-
-            // UV 半径を安全な範囲にクランプ（0.01〜0.5）
-            uvRadius = Mathf.Clamp(uvRadius, 0.01f, 0.5f);
-
-            SimpleCpuBrush(_paintTexture, uv, color, uvRadius);
+            int radius = pixelRadiusOverride > 0 ? pixelRadiusOverride : brushPixelRadius;
+            PaintPixels(_paintTexture, uv, color, radius);
         }
 
-
         // ────────────────────────────────────────────────────────────
-        // 内部：CPU ブラシ描画
+        // 内部：CPU ブラシ描画（ピクセル半径指定）
         // ────────────────────────────────────────────────────────────
 
-        private void SimpleCpuBrush(RenderTexture rt, Vector2 uv, Color color, float radius)
+        private static void PaintPixels(RenderTexture rt, Vector2 uv, Color color, int pixelRadius)
         {
-            // ① RenderTexture の現在内容を Texture2D に読み出す
+            // ① RenderTexture → Texture2D へ読み出す
             Texture2D tmp = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
             RenderTexture prev = RenderTexture.active;
             RenderTexture.active = rt;
@@ -102,29 +85,28 @@ namespace OmiyaFes2026
             tmp.Apply();
             RenderTexture.active = prev;
 
-            // ② UV → ピクセル座標に変換
-            int cx = Mathf.RoundToInt(uv.x * rt.width);
-            int cy = Mathf.RoundToInt(uv.y * rt.height);
-            int pr = Mathf.RoundToInt(radius * rt.width);
+            // ② UV → ピクセル座標
+            int cx = Mathf.RoundToInt(uv.x * (rt.width  - 1));
+            int cy = Mathf.RoundToInt(uv.y * (rt.height - 1));
+            int pr = pixelRadius;
+            float prF = (float)pr;
 
-            // ③ ブラシ半径内を走査して色を塗る
+            // ③ ブラシ円内を走査
             for (int dx = -pr; dx <= pr; dx++)
             {
                 for (int dy = -pr; dy <= pr; dy++)
                 {
                     float dist = Mathf.Sqrt(dx * dx + dy * dy);
-                    if (dist > pr) continue;
+                    if (dist > prF) continue;
 
                     int px = cx + dx;
                     int py = cy + dy;
-                    // テクスチャ範囲外はスキップ
                     if (px < 0 || px >= rt.width || py < 0 || py >= rt.height) continue;
 
-                    // 外周ほど透明になるグラデーション
-                    float alpha = Mathf.Lerp(1f, 0f, dist / pr);
+                    // 外周に向かって透明になるグラデーション
+                    float alpha = Mathf.Lerp(1f, 0f, dist / prF);
                     Color existing = tmp.GetPixel(px, py);
-                    // 既存の色とブレンド（上書きではなく重ね塗り）
-                    Color blended = Color.Lerp(existing, color, alpha);
+                    Color blended  = Color.Lerp(existing, color, alpha);
                     blended.a = Mathf.Max(existing.a, alpha);
                     tmp.SetPixel(px, py, blended);
                 }
