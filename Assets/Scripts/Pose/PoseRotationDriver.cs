@@ -60,7 +60,7 @@ namespace OmiyaFes2026.Pose
         [SerializeField] private bool usePresetRelativeAxisCorrection = true;
 
         [Tooltip("iPhone 用の相対軸符号（ARD デフォルト: -1,-1,1）")]
-        [SerializeField] private Vector3 iPhoneRelativeAxisSigns = new Vector3(-1f, -1f, 1f);
+        [SerializeField] private Vector3 iPhoneRelativeAxisSigns = new Vector3(1f, -1f, 1f);
 
         [Tooltip("Android 用の相対軸符号")]
         [SerializeField] private Vector3 androidRelativeAxisSigns = Vector3.one;

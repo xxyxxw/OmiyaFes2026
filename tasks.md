@@ -25,6 +25,8 @@
   - ZIG SIM 接続 → ReceivedPacketCount が増えるか確認
   - C キーでキャリブレーション → スマホを左右/上下に向けて aimTarget が追従するか
   - `controlMode = RotateGun` が推奨（初回はこちらで挙動確認）
+  - **[済] 左右反転を修正** → `iPhoneRelativeAxisSigns = (1, -1, 1)`（Y軸のみ反転）
+  - **[済] AimDirectionLineVisualizer 追加**（forward方向をLineRendererで可視化）
 
 ## 📋 未着手
 
