@@ -87,18 +87,19 @@ namespace OmiyaFes2026.Pose
         // ARD 互換プロパティ
         public QuaternionCoordinatePreset CoordinatePreset => coordinatePreset;
         public bool ScreenFaceDown => screenFaceDown;
+        /// <summary>ARD 互換エイリアス（LatestQuaternion の別名）</summary>
+        public Quaternion LatestRawRotation => LatestQuaternion;
 
         // ── デバッグ用（メインスレッド側でログを出す）────────────
-        // 受信スレッドはDebug.Logを直接呼べないため、ここにキューして
-        // Update()でまとめて出力する
         private readonly Queue<string> _debugLogQueue = new Queue<string>();
         private float _nextReportTime;
         private int _lastReportedCount;
 
-        // 受信判定用─────────────────────────────────────────────
-        // 「直近 N 秒以内にパケットが来たか」で判定する（フレーム単位だと偏りすぎる）
-        private const float ReceivingTimeout = 0.5f;  // この秒数以内に受信があればIsReceiving=true
-        private float _lastPacketTime = -999f;         // 最後にパケットを受信したメインスレッド時刻
+        // IsReceiving 判定用
+        // ★ _hasPending を消費しないよう ReceivedPacketCount の変化で判定する
+        private const float ReceivingTimeout = 0.5f;
+        private float _lastPacketTime = -999f;        // 最後にカウント増加を検出したメインスレッド時刻
+        private int   _lastObservedPacketCount;       // 前フレームの ReceivedPacketCount
 
         // ────────────────────────────────────────────────────────────
         // 正規表現（スタティック、コンパイル済み）
@@ -148,18 +149,18 @@ namespace OmiyaFes2026.Pose
 
         private void Update()
         {
-            lock (_lock)
+            // ★ _hasPending は絶対に触らない。
+            //    ConsumeLatestRotation() だけが消費する設計。
+            //    IsReceiving の判定は ReceivedPacketCount の変化で行う。
+            int currentCount;
+            lock (_lock) { currentCount = ReceivedPacketCount; }
+
+            if (currentCount != _lastObservedPacketCount)
             {
-                if (_hasPending)
-                {
-                    // LatestQuaternion は受信スレッド側で更新済み
-                    _hasPending      = false;
-                    _lastPacketTime  = Time.time;
-                }
+                _lastPacketTime          = Time.time;
+                _lastObservedPacketCount = currentCount;
             }
 
-            // 「直近 0.5秒以内にパケットが来た」ならIsReceiving=true
-            // フレーム単位だと途切れたフレームで誤半断するため時間ベースにする
             IsReceiving = (Time.time - _lastPacketTime) <= ReceivingTimeout;
 
             // ── デバッグログをメインスレッドから出力 ──────────────
@@ -390,10 +391,25 @@ namespace OmiyaFes2026.Pose
                             $"[UdpQR] 📦 パケット到達 from={remoteEP} bytes={size} format={formatHint}");
                     }
 
+                    // ── タッチ（スマホ画面タップ）によるリセンター検出 ──────────────
+                    // ZIG SIM は touch / touchcount を OSC で送ってくる。
+                    // テキストに "touchcount" または "touch" が含まれていたらリセンター要求とみなす。
+                    if (size > 0)
+                    {
+                        string textSnippet = System.Text.Encoding.UTF8.GetString(data, 0, Mathf.Min(size, 256));
+                        if (textSnippet.IndexOf("touchcount", System.StringComparison.OrdinalIgnoreCase) >= 0
+                         || textSnippet.IndexOf("/touch", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            Interlocked.Increment(ref _pendingRecenterRequests);
+                            EnqueueDebugLog("[UdpQR] 👆 タッチ検出 → リセンター要求");
+                        }
+                    }
+
                     QuaternionPacketParseResult result = TryParseQuaternionPacket(data);
 
                     if (result.Succeeded && result.HasCompleteQuaternion)
                     {
+
                         // ARD と同じパイプライン:
                         // 生 Quat → 半球安定化 → ConvertToUnity
                         Quaternion rawQ  = result.Quaternion;

@@ -12,6 +12,9 @@
   - `QuaternionCoordinateConverter` → LookRotation ベース・半球安定化・IosToUnity後方互換
   - `QuaternionCalibrationUtility` → 新規作成（`CalculateRelativeRotation`）
   - `UdpQuaternionReceiver` → `ConsumeLatestRotation` / `ClearPendingRotation` / `ConsumePendingRecenterRequest` / `StabilizeRawQuaternion` 追加・受信ループで `ConvertToUnity` 適用
+  - **[バグ修正]** `UdpQuaternionReceiver.Update()` が `_hasPending` を消費するバグを修正 → `ReceivedPacketCount` ベースの `IsReceiving` 判定に変更。`ConsumeLatestRotation()` 専用消費を確立。
+  - `LatestRawRotation` プロパティ追加（ARD互換エイリアス）
+  - タッチOSCメッセージ検出で `_pendingRecenterRequests` を Increment する処理追加
   - `PoseRotationDriver` → ARD 方式（`initialLocalRotation * relativeRotation * modelOffset`）・autoCalibrateOnFirstPacket・rotationSmoothing・`ResetCalibration()`
   - `PoseCalibrationCoordinator` → ARD 方式（ResetCalibration + ConsumePendingRecenterRequest）
 
