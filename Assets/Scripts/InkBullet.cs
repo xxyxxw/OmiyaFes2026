@@ -22,8 +22,8 @@ namespace OmiyaFes2026
         [SerializeField] private float speed    = 20f; // 弾の速さ（Units/秒）
         [SerializeField] private float lifetime = 3f;  // 自動消滅までの秒数
 
-        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 8 → 直径16px）")]
-        [SerializeField] [Range(1, 64)] private int brushPixelRadius = 8;
+        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 30 → 直径60px）")]
+        [SerializeField] [Range(1, 128)] private int brushPixelRadius = 30;
 
         // ────────────────────────────────────────────────────────────
         // 内部状態
