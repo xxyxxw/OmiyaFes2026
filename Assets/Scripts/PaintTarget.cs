@@ -20,8 +20,8 @@ namespace OmiyaFes2026
         [Tooltip("ペイントテクスチャの解像度（例: 512）")]
         [SerializeField] private int textureSize = 512;
 
-        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 30 なら直径60px）")]
-        [SerializeField] [Range(1, 128)] private int brushPixelRadius = 30;
+        [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 128 なら直径256px≈テクスチャの半分）")]
+        [SerializeField] [Range(1, 256)] private int brushPixelRadius = 128;
 
         // ────────────────────────────────────────────────────────────
         // 内部フィールド

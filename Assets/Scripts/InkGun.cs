@@ -38,8 +38,8 @@ namespace OmiyaFes2026
         [SerializeField] private float bulletScale = 0.2f;
 
         [Header("インク塗りブラシ半径（ピクセル単位）")]
-        [Tooltip("弾が当たった中心から何ピクセル塗るか（例: 30 → 直径60px）")]
-        [SerializeField] [Range(1, 128)] private int brushPixelRadius = 30;
+        [Tooltip("弾が当たった中心から何ピクセル塗るか（例: 128 → 直径256px≈テクスチャの半分）")]
+        [SerializeField] [Range(1, 256)] private int brushPixelRadius = 128;
 
         // ────────────────────────────────────────────────────────────
         // 内部参照・状態
