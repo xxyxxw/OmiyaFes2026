@@ -54,10 +54,10 @@ namespace OmiyaFes2026.Pose
 
         [Header("向き反転補正（動作がおかしい場合にONにする）")]
         [Tooltip("左右が反転しているときにON")]
-        [SerializeField] private bool invertLeftRight = true;
+        [SerializeField] private bool invertLeftRight = false;
 
         [Tooltip("上下が反転しているときにON")]
-        [SerializeField] private bool invertUpDown = false;
+        [SerializeField] private bool invertUpDown = true;
 
         [Header("感度（MoveCrosshair モード用）")]
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityH = 3.0f;
