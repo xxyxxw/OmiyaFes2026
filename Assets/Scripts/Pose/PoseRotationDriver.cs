@@ -9,14 +9,10 @@ namespace OmiyaFes2026.Pose
     ///   1. UdpQuaternionReceiver.ConsumeLatestRotation() で変換済みクォータニオンを取得
     ///   2. 初回パケット or Cキー で referenceSensorRotation を保存（キャリブレーション）
     ///   3. QuaternionCalibrationUtility.CalculateRelativeRotation() で相対回転を算出
-    ///   4. initialLocalRotation * relativeRotation * modelEulerOffset を aimTarget.localRotation に適用
+    ///   4. invertLeftRight / invertUpDown で向き補正
+    ///   5. initialLocalRotation * relativeRotation * modelEulerOffset を aimTarget.localRotation に適用
     ///
-    /// ▼ 公開プロパティ（後方互換維持）
-    ///   AimTarget / CurrentYawDeg / CurrentPitchDeg
-    ///
-    /// ▼ キャリブレーション
-    ///   Calibrate()         … 後方互換ラッパー
-    ///   ResetCalibration()  … ARD 方式（PoseCalibrationCoordinator から呼ばれる）
+    /// ▼ 左右・上下が逆なら Inspector の invertLeftRight / invertUpDown を ON にする
     /// </summary>
     [RequireComponent(typeof(UdpQuaternionReceiver))]
     [AddComponentMenu("OmiyaFes/Pose Rotation Driver")]
@@ -46,7 +42,7 @@ namespace OmiyaFes2026.Pose
         [Tooltip("向きまたは位置を制御するオブジェクト（銃、照準カーソルなど）")]
         [SerializeField] private Transform aimTarget;
 
-        [Header("ARD 方式 キャリブレーション設定")]
+        [Header("キャリブレーション設定")]
         [Tooltip("最初のパケット受信時に自動キャリブレーションするか")]
         [SerializeField] private bool autoCalibrateOnFirstPacket = true;
 
@@ -56,14 +52,12 @@ namespace OmiyaFes2026.Pose
         [Tooltip("モデルの初期向き補正（Euler 角で指定）")]
         [SerializeField] private Vector3 modelEulerOffset = Vector3.zero;
 
-        [Tooltip("キャリブレーション後の相対軸補正を使うか")]
-        [SerializeField] private bool usePresetRelativeAxisCorrection = true;
+        [Header("向き反転補正（動作がおかしい場合にONにする）")]
+        [Tooltip("左右が反転しているときにON")]
+        [SerializeField] private bool invertLeftRight = true;
 
-        [Tooltip("iPhone 用の相対軸符号（ARD デフォルト: -1,-1,1）")]
-        [SerializeField] private Vector3 iPhoneRelativeAxisSigns = new Vector3(1f, -1f, 1f);
-
-        [Tooltip("Android 用の相対軸符号")]
-        [SerializeField] private Vector3 androidRelativeAxisSigns = Vector3.one;
+        [Tooltip("上下が反転しているときにON")]
+        [SerializeField] private bool invertUpDown = false;
 
         [Header("感度（MoveCrosshair モード用）")]
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityH = 3.0f;
@@ -131,7 +125,6 @@ namespace OmiyaFes2026.Pose
             Quaternion nextRotation;
             if (!_receiver.ConsumeLatestRotation(out nextRotation))
             {
-                // 新パケットなし → スムージングだけ適用して終了
                 ApplySmoothingToTarget();
                 return;
             }
@@ -144,20 +137,26 @@ namespace OmiyaFes2026.Pose
                 Debug.Log("[PoseRotationDriver] ✅ 自動キャリブレーション（初回パケット）");
             }
 
-            // 相対回転を算出
+            // 相対回転を算出（基準からの差分）
             Quaternion relativeRotation = _hasCalibration
                 ? QuaternionCalibrationUtility.CalculateRelativeRotation(_referenceSensorRotation, nextRotation)
                 : nextRotation;
 
-            // iPhone 用の軸補正（ARD デフォルト: Yaw/Pitch を反転）
-            if (usePresetRelativeAxisCorrection
-                && _receiver.CoordinatePreset == QuaternionCoordinatePreset.IPhoneCoreMotion)
+            // ────────────────────────────────────────────────────────
+            // 向き反転補正
+            // invertLeftRight / invertUpDown を Inspector で ON/OFF して調整する。
+            // 既存シリアライズ値に依存しない新規 bool なので必ずコードデフォルトが使われる。
+            // ────────────────────────────────────────────────────────
+            if (invertLeftRight || invertUpDown)
             {
-                relativeRotation = QuaternionCoordinateConverter.ApplyRelativeAxisPreset(
-                    relativeRotation,
-                    _receiver.CoordinatePreset,
-                    iPhoneRelativeAxisSigns,
-                    androidRelativeAxisSigns);
+                Vector3 eu    = relativeRotation.eulerAngles;
+                float pitch   = Mathf.DeltaAngle(0f, eu.x);
+                float yaw     = Mathf.DeltaAngle(0f, eu.y);
+                float roll    = Mathf.DeltaAngle(0f, eu.z);
+                relativeRotation = Quaternion.Euler(
+                    invertUpDown    ? -pitch : pitch,
+                    invertLeftRight ? -yaw   : yaw,
+                    roll);
             }
 
             // Yaw/Pitch を更新（UI / AimingController 用）

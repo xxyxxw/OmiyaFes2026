@@ -174,7 +174,7 @@ namespace OmiyaFes2026.Pose
         // 内部変換
         // ────────────────────────────────────────────────────────────
 
-        /// <summary>iPhone CoreMotion → Unity 変換（LookRotation ベース）</summary>
+        /// <summary>iPhone CoreMotion → Unity 変換（LookRotation ベース・ARD オリジナル）</summary>
         private static Quaternion ConvertIPhoneCoreMotion(
             Quaternion sensorQuaternion,
             bool convertHandedness,
@@ -183,11 +183,11 @@ namespace OmiyaFes2026.Pose
             if (!convertHandedness) return sensorQuaternion;
 
             // CoreMotion デバイス軸:
-            //   +X = 画面右, +Y = 画面上端方向, +Z = 画面外向き
-            // Unity では +Z を「ポインタの前方」にするため LookRotation を使う。
-            // screenFaceDown 時は画面が下向きなので left/right が反転する → 補正が必要。
-            Vector3 deviceRight    = RotateVector(sensorQuaternion, Vector3.right);
-            Vector3 deviceTop      = RotateVector(sensorQuaternion, Vector3.up);
+            //   +X = 画面右, +Y = 画面上端方向（top）, +Z = 画面外向き（ユーザー側）
+            //
+            // スマホを「銃のように前方に向けて横持ち（top が前方）」する想定。
+            // deviceTop をポインタの forward, -deviceScreenOut をポインタの up にマップ。
+            Vector3 deviceTop       = RotateVector(sensorQuaternion, Vector3.up);
             Vector3 deviceScreenOut = RotateVector(sensorQuaternion, Vector3.forward);
 
             if (deviceTop.sqrMagnitude <= 0.000001f || deviceScreenOut.sqrMagnitude <= 0.000001f)
@@ -195,13 +195,15 @@ namespace OmiyaFes2026.Pose
 
             if (screenFaceDown)
             {
-                // Face-down: 左右反転補正のため deviceTop を正面, deviceScreenOut を上ベクトルに使う
+                // Face-down（画面下向き）: 上下が反転するため補正
                 return Quaternion.LookRotation(deviceTop.normalized, deviceScreenOut.normalized);
             }
 
-            // 通常（face-up）: deviceTop を正面, -deviceScreenOut を上ベクトルに使う
+            // 通常（face-up / 横持ち）
             return Quaternion.LookRotation(deviceTop.normalized, -deviceScreenOut.normalized);
         }
+
+
 
         /// <summary>Android RotationVector → Unity 左手系変換</summary>
         private static Quaternion ConvertHandedness(
