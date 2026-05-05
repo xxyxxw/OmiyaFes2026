@@ -50,7 +50,7 @@ namespace OmiyaFes2026
         {
             // 待機中パネルのメッセージを設定
             if (waitingMessageText != null)
-                waitingMessageText.text = "スマホを傾けてインクを塗ろう！\nZIG SIM でジャイロを送信してください";
+                waitingMessageText.text = "流れてくるものをインク銃で塗ろう！\nZIG SIM でジャイロを送信してゲームスタート";
 
             // GameStateManager のイベントを購読してゲーム状態の変化に合わせてパネルを切替える
             // += でラムダ式を登録することで、状態変化時に自動呼び出しされる

@@ -19,8 +19,12 @@ namespace OmiyaFes2026
         // ────────────────────────────────────────────────────────────
 
         [Header("設定")]
-        [SerializeField] private float gameDuration     = 45f;  // ゲームプレイ時間（秒）
-        [SerializeField] private float inactivityTimeout = 10f; // 操作がない場合のタイムアウト（秒）
+        [SerializeField] private float gameDuration      = 45f;  // ゲームプレイ時間（秒）
+        [SerializeField] private float inactivityTimeout = 10f;  // 操作がない場合のタイムアウト（秒）
+
+        [Header("デバッグ（テスト用）")]
+        [Tooltip("チェックを入れるとスペースキーでゲーム開始できる（ZIG SIM不要）")]
+        [SerializeField] private bool enableSpaceKeyStart = true;
 
         // ────────────────────────────────────────────────────────────
         // シングルトン
@@ -45,6 +49,8 @@ namespace OmiyaFes2026
         // ────────────────────────────────────────────────────────────
 
         private float _inactivityTimer = 0f; // 最後に操作があってからの経過時間
+        private Pose.UdpQuaternionReceiver _receiver; // キャッシュする（毎フレームFindしない）
+        private int _lastPacketCount = 0;             // 前フレームの受信カウント（非操作判定用）
 
         // ────────────────────────────────────────────────────────────
         // イベント（購読すると状態変化を受け取れる）
@@ -68,6 +74,14 @@ namespace OmiyaFes2026
                 return;
             }
             Instance = this;
+
+            // receiver をシーンから一度だけ検索してキャッシュ（毎フレームの重いFindを避ける）
+            _receiver = FindObjectOfType<Pose.UdpQuaternionReceiver>();
+            if (_receiver == null)
+                Debug.LogWarning("[GameStateManager] UdpQuaternionReceiverがシーンに見つかりません。" +
+                                 "Hierarchyの GameObject に UdpQuaternionReceiver をアタッチしてください。");
+            else
+                Debug.Log($"[GameStateManager] receiver 検出: {_receiver.gameObject.name}");
         }
 
         private void Update()
@@ -102,11 +116,31 @@ namespace OmiyaFes2026
 
         private void HandleWaiting()
         {
-            // ZIG SIM からパケット受信を検知したらゲーム開始
-            // UdpQuaternionReceiver を参照して判断する
-            var receiver = FindObjectOfType<Pose.UdpQuaternionReceiver>();
-            if (receiver != null && receiver.IsReceiving)
+            // ── テスト用：スペースキーでゲーム開始 ────────────────
+            if (enableSpaceKeyStart && Input.GetKeyDown(KeyCode.Space))
             {
+                Debug.Log("[GameStateManager] スペースキーでゲーム開始（デバッグ）");
+                StartGame();
+                return;
+            }
+
+            // ── receiver が見つからない場合は再検索する ────────────
+            if (_receiver == null)
+            {
+                _receiver = FindObjectOfType<Pose.UdpQuaternionReceiver>();
+                if (_receiver == null)
+                {
+                    if (Time.frameCount % 300 == 0)
+                        Debug.LogWarning("[GameStateManager] UdpQuaternionReceiver が見つかりません");
+                    return;
+                }
+                Debug.Log($"[GameStateManager] receiver 再検出: {_receiver.gameObject.name}");
+            }
+
+            // ── ZIG SIM からパケット受信を検知したらゲーム開始 ───
+            if (_receiver.IsReceiving)
+            {
+                Debug.Log($"[GameStateManager] ZIG SIM 受信検知 → ゲーム開始");
                 StartGame();
             }
         }
@@ -116,29 +150,32 @@ namespace OmiyaFes2026
             // 残り時間を毎フレーム減らす
             RemainingTime -= Time.deltaTime;
 
-            // ── 非操作タイムアウト判定 ──────────────────────────
-            var receiver = FindObjectOfType<Pose.UdpQuaternionReceiver>();
-            bool isActive = receiver != null && receiver.IsReceiving;
-
-            if (isActive)
+            // ── 非操作タイムアウト判定（ReceivedPacketCountの増分で判断） ──
+            // IsReceivingは0.5秒スケールなので、パケット数の増分が0の場合にのみタイマー秒積す
+            if (_receiver != null)
             {
-                // スマホから受信中はタイマーをリセット（操作あり）
-                _inactivityTimer = 0f;
+                int currentCount = _receiver.ReceivedPacketCount;
+                bool isActive = currentCount != _lastPacketCount;
+                _lastPacketCount = currentCount;
+
+                if (isActive)
+                    _inactivityTimer = 0f;
+                else
+                    _inactivityTimer += Time.deltaTime;
             }
             else
             {
-                // 受信が止まったら非操作タイマーを積算
                 _inactivityTimer += Time.deltaTime;
-                if (_inactivityTimer >= inactivityTimeout)
-                {
-                    // タイムアウトしたら強制リセット
-                    Debug.Log("[GameStateManager] 非操作タイムアウト → リセット");
-                    ResetGame();
-                    return;
-                }
             }
 
-            // ── 時間切れ判定 ──────────────────────────
+            if (_inactivityTimer >= inactivityTimeout)
+            {
+                Debug.Log("[GameStateManager] 非操作タイムアウト → リセット");
+                ResetGame();
+                return;
+            }
+
+            // ── 時間切れ判定 ──────────────────
             if (RemainingTime <= 0f)
             {
                 RemainingTime = 0f;
