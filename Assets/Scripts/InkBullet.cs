@@ -4,13 +4,14 @@ namespace OmiyaFes2026
 {
     /// <summary>
     /// インク弾の飛翔・当たり判定・ペイント処理。
-    /// InkGun から生成後に Initialize() を呼ぶ。
-    /// OnTriggerEnter で PaintTarget に命中したら UV 座標を取得してインクを塗る。
     ///
-    /// ▼ 設計方針
-    ///   - MeshCollider に対して Raycast して hit.textureCoord を取得
-    ///   - PaintTarget.Paint(uv, color, pixelRadius) を呼ぶ
-    ///   - brushPixelRadius で塗るサイズを直接ピクセル単位で指定（例: 8 = 直径16px）
+    /// ▼ UV 取得の優先順位
+    ///   1. MeshCollider がある → hit.textureCoord で正確に取得
+    ///   2. BoxCollider / SphereCollider など → Physics.Raycast で着弾ワールド座標を取得し
+    ///      オブジェクトのローカル空間に変換して UV を近似計算
+    ///   3. すべて失敗 → 弾の現在ワールド座標から UV を近似（最終フォールバック）
+    ///
+    /// これにより「オブジェクトの中心」ではなく「実際の着弾点」にインクが塗られる。
     /// </summary>
     public class InkBullet : MonoBehaviour
     {
@@ -18,8 +19,8 @@ namespace OmiyaFes2026
         // インスペクター設定フィールド
         // ────────────────────────────────────────────────────────────
 
-        [SerializeField] private float speed            = 20f; // 弾の速さ（Units/秒）
-        [SerializeField] private float lifetime         = 3f;  // 自動消滅までの秒数
+        [SerializeField] private float speed    = 20f; // 弾の速さ（Units/秒）
+        [SerializeField] private float lifetime = 3f;  // 自動消滅までの秒数
 
         [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 8 → 直径16px）")]
         [SerializeField] [Range(1, 64)] private int brushPixelRadius = 8;
@@ -37,9 +38,6 @@ namespace OmiyaFes2026
         // 公開メソッド
         // ────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// InkGun から Instantiate 直後に呼ぶ初期化メソッド。
-        /// </summary>
         public void Initialize(Vector3 direction, Color inkColor, int pixelRadius = 8)
         {
             _direction       = direction.normalized;
@@ -59,12 +57,6 @@ namespace OmiyaFes2026
             transform.Translate(_direction * speed * Time.deltaTime, Space.World);
         }
 
-        /// <summary>
-        /// Trigger Collider が別の Collider に触れたとき呼ばれる。
-        /// PaintTarget を持つオブジェクトなら UV を取得してインクを塗る。
-        /// ※ InkBullet 自身は SphereCollider (isTrigger=true) + Rigidbody(kinematic) を持つ。
-        /// ※ 対象オブジェクトは MeshCollider(non-convex, non-trigger) を持つ。
-        /// </summary>
         private void OnTriggerEnter(Collider other)
         {
             if (_hasHit) return;
@@ -74,30 +66,71 @@ namespace OmiyaFes2026
 
             _hasHit = true;
 
-            // MeshCollider に Raycast して UV 座標を取得
-            var meshCol = other as MeshCollider;
-            if (meshCol == null)
-                meshCol = other.GetComponent<MeshCollider>();
+            // 実際の着弾点の UV を計算して塗る
+            Vector2 uv = GetHitUV(other);
+            paintTarget.Paint(uv, _color, brushPixelRadius);
 
+            Debug.Log($"[InkBullet] 命中！UV={uv} color={_color} pixelR={brushPixelRadius}");
+            Destroy(gameObject);
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // 着弾点の UV 取得（着弾点を正確に取る）
+        // ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Collider の種類に関わらず着弾 UV を取得する。
+        /// MeshCollider → textureCoord、それ以外 → ローカル座標変換による近似。
+        /// </summary>
+        private Vector2 GetHitUV(Collider col)
+        {
+            // 弾の少し後ろから前方へ Raycast（接触直前の位置から撃つ）
+            Ray ray = new Ray(transform.position - _direction * 0.5f, _direction);
+            float maxDist = 2f;
+
+            // ① MeshCollider がある → textureCoord で正確に取得
+            var meshCol = col as MeshCollider ?? col.GetComponent<MeshCollider>();
             if (meshCol != null)
             {
-                Ray ray = new Ray(transform.position - _direction * 0.5f, _direction);
-
-                if (meshCol.Raycast(ray, out RaycastHit hit, 2f))
+                if (meshCol.Raycast(ray, out RaycastHit meshHit, maxDist))
                 {
-                    // 着弾 UV 座標をそのまま渡す（ピクセル半径は brushPixelRadius）
-                    paintTarget.Paint(hit.textureCoord, _color, brushPixelRadius);
-                    Debug.Log($"[InkBullet] 命中！UV={hit.textureCoord} color={_color} pixelR={brushPixelRadius}");
-                }
-                else
-                {
-                    // Raycast 失敗時は中心にフォールバック
-                    paintTarget.Paint(new Vector2(0.5f, 0.5f), _color, brushPixelRadius);
-                    Debug.Log("[InkBullet] UV取得失敗 → 中心に塗る（フォールバック）");
+                    Debug.Log("[InkBullet] MeshCollider UV取得成功");
+                    return meshHit.textureCoord;
                 }
             }
 
-            Destroy(gameObject);
+            // ② Physics.Raycast でワールド着弾点を取得してローカル座標 → UV に変換
+            //    ※ BoxCollider / SphereCollider / CapsuleCollider など非メッシュに有効
+            if (Physics.Raycast(ray, out RaycastHit worldHit, maxDist) && worldHit.collider == col)
+            {
+                Debug.Log($"[InkBullet] Physics.Raycast 着弾点={worldHit.point}");
+                return WorldPointToUV(col, worldHit.point);
+            }
+
+            // ③ 最終フォールバック: 弾の現在ワールド位置から UV を近似
+            Debug.LogWarning("[InkBullet] Raycast 失敗 → 弾位置から UV を近似");
+            return WorldPointToUV(col, transform.position);
+        }
+
+        /// <summary>
+        /// ワールド座標をオブジェクトのローカル空間に変換し UV に近似する。
+        ///
+        /// Unity プリミティブ（Cube, Sphere など）のメッシュ頂点は
+        /// ローカル空間で ±0.5 の範囲に収まるため：
+        ///   localX ∈ [-0.5, +0.5] → U = localX + 0.5 ∈ [0, 1]
+        ///   localY ∈ [-0.5, +0.5] → V = localY + 0.5 ∈ [0, 1]
+        /// でマッピングする。
+        /// </summary>
+        private static Vector2 WorldPointToUV(Collider col, Vector3 worldPoint)
+        {
+            // InverseTransformPoint は位置・回転・スケールすべて考慮してローカル座標へ変換する
+            Vector3 local = col.transform.InverseTransformPoint(worldPoint);
+
+            // X → U, Y → V（正面から当たる想定。横移動オブジェクトに適合）
+            float u = Mathf.Clamp01(local.x + 0.5f);
+            float v = Mathf.Clamp01(local.y + 0.5f);
+
+            return new Vector2(u, v);
         }
     }
 }
