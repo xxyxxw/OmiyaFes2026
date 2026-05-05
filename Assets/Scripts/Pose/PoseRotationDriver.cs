@@ -3,22 +3,20 @@ using UnityEngine;
 namespace OmiyaFes2026.Pose
 {
     /// <summary>
-    /// ZIG SIM のジャイロ値でスマホの姿勢を Unity 内に反映する。
+    /// ARD (uni-bit/yugo-ShibaLab-ARD) 方式に寄せた姿勢制御ドライバー。
     ///
-    /// ▼ 制御モードは2種類（Inspector で切替）
+    /// ▼ 動作フロー
+    ///   1. UdpQuaternionReceiver.ConsumeLatestRotation() で変換済みクォータニオンを取得
+    ///   2. 初回パケット or Cキー で referenceSensorRotation を保存（キャリブレーション）
+    ///   3. QuaternionCalibrationUtility.CalculateRelativeRotation() で相対回転を算出
+    ///   4. initialLocalRotation * relativeRotation * modelEulerOffset を aimTarget.localRotation に適用
     ///
-    ///   [MODE A] RotateGun  （デフォルト）
-    ///     スマホを向けた方向に「銃オブジェクトの向き（Rotation）」を変える。
-    ///     銃の transform.forward が照準方向になる。
-    ///     → GunAimVisualizer と組み合わせてレイを可視化する。
+    /// ▼ 公開プロパティ（後方互換維持）
+    ///   AimTarget / CurrentYawDeg / CurrentPitchDeg
     ///
-    ///   [MODE B] MoveCrosshair
-    ///     スマホの傾きを「画面上のカーソル位置（スクリーン座標）」に変換し、
-    ///     カーソルオブジェクト（WorldSpace Canvas 上の UI など）を移動させる。
-    ///     スマホを右に向けると銃が右に動く、上に向けると上に動く。
-    ///
-    /// ▼ キャリブレーション（C キー）
-    ///   Calibrate() を呼ぶと、その瞬間の向きが「正面（中央）」として記録される。
+    /// ▼ キャリブレーション
+    ///   Calibrate()         … 後方互換ラッパー
+    ///   ResetCalibration()  … ARD 方式（PoseCalibrationCoordinator から呼ばれる）
     /// </summary>
     [RequireComponent(typeof(UdpQuaternionReceiver))]
     [AddComponentMenu("OmiyaFes/Pose Rotation Driver")]
@@ -30,9 +28,9 @@ namespace OmiyaFes2026.Pose
 
         public enum ControlMode
         {
-            /// <summary>スマホの向きで銃の Rotation を直接制御する（姿勢反映）</summary>
+            /// <summary>スマホの向きで aimTarget の Rotation を直接制御する（ARD 方式）</summary>
             RotateGun,
-            /// <summary>スマホの傾きを画面上の 2D 位置に変換して銃/カーソルを動かす</summary>
+            /// <summary>スマホの傾きを画面上の 2D 位置に変換して aimTarget を動かす</summary>
             MoveCrosshair,
         }
 
@@ -41,45 +39,56 @@ namespace OmiyaFes2026.Pose
         // ────────────────────────────────────────────────────────────
 
         [Header("制御モード")]
-        [Tooltip("RotateGun: スマホ向き＝銃の向き / MoveCrosshair: スマホ傾き＝銃の位置")]
-        [SerializeField] private ControlMode controlMode = ControlMode.MoveCrosshair;
+        [Tooltip("RotateGun: スマホ向き＝銃の向き（推奨） / MoveCrosshair: スマホ傾き＝銃の位置")]
+        [SerializeField] private ControlMode controlMode = ControlMode.RotateGun;
 
         [Header("照準対象 Transform")]
         [Tooltip("向きまたは位置を制御するオブジェクト（銃、照準カーソルなど）")]
         [SerializeField] private Transform aimTarget;
 
+        [Header("ARD 方式 キャリブレーション設定")]
+        [Tooltip("最初のパケット受信時に自動キャリブレーションするか")]
+        [SerializeField] private bool autoCalibrateOnFirstPacket = true;
+
+        [Tooltip("スムージング量（0=即時適用、0より大きいと Slerp で滑らか）")]
+        [SerializeField] [Range(0f, 0.95f)] private float rotationSmoothing = 0f;
+
+        [Tooltip("モデルの初期向き補正（Euler 角で指定）")]
+        [SerializeField] private Vector3 modelEulerOffset = Vector3.zero;
+
+        [Tooltip("キャリブレーション後の相対軸補正を使うか")]
+        [SerializeField] private bool usePresetRelativeAxisCorrection = true;
+
+        [Tooltip("iPhone 用の相対軸符号（ARD デフォルト: -1,-1,1）")]
+        [SerializeField] private Vector3 iPhoneRelativeAxisSigns = new Vector3(-1f, -1f, 1f);
+
+        [Tooltip("Android 用の相対軸符号")]
+        [SerializeField] private Vector3 androidRelativeAxisSigns = Vector3.one;
+
         [Header("感度（MoveCrosshair モード用）")]
-        [Tooltip("横方向の感度（スマホを左右に傾けたときの動く量）")]
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityH = 3.0f;
-
-        [Tooltip("縦方向の感度（スマホを上下に傾けたときの動く量）")]
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityV = 3.0f;
-
-        [Tooltip("スムージング量（0=即時、1=ほぼ動かない）。0.05〜0.2 が自然")]
-        [SerializeField] [Range(0f, 0.95f)] private float smoothing = 0.1f;
+        [SerializeField] [Range(0f, 0.95f)] private float smoothing    = 0.1f;
 
         [Header("移動範囲（MoveCrosshair モード用）")]
-        [Tooltip("画面端からのオフセット（度）。スマホをどこまで傾けたら端に到達するか")]
-        [SerializeField] private float maxYawDeg  = 40f; // 左右の最大角度
-        [SerializeField] private float maxPitchDeg = 30f; // 上下の最大角度
-
-        [Tooltip("移動させる平面の距離（カメラから何m先でスクリーン座標→ワールド座標に変換するか）")]
+        [SerializeField] private float maxYawDeg   = 40f;
+        [SerializeField] private float maxPitchDeg = 30f;
         [SerializeField] private float screenDepth = 10f;
 
         [Header("デバッグ")]
         [SerializeField] private bool showDebugGizmos = true;
 
         // ────────────────────────────────────────────────────────────
-        // 公開プロパティ
+        // 公開プロパティ（後方互換維持）
         // ────────────────────────────────────────────────────────────
 
         /// <summary>外部スクリプト（InkGun など）から参照できる照準 Transform</summary>
         public Transform AimTarget => aimTarget;
 
-        /// <summary>現在のキャリブレーション後の Yaw 角度（度, 左右 -180〜180）</summary>
+        /// <summary>現在のキャリブレーション後の Yaw 角度（度）</summary>
         public float CurrentYawDeg { get; private set; }
 
-        /// <summary>現在のキャリブレーション後の Pitch 角度（度, 上下 -180〜180）</summary>
+        /// <summary>現在のキャリブレーション後の Pitch 角度（度）</summary>
         public float CurrentPitchDeg { get; private set; }
 
         // ────────────────────────────────────────────────────────────
@@ -87,8 +96,13 @@ namespace OmiyaFes2026.Pose
         // ────────────────────────────────────────────────────────────
 
         private UdpQuaternionReceiver _receiver;
-        private Quaternion _calibrationOffset = Quaternion.identity;
-        private Camera     _mainCamera;
+        private Camera _mainCamera;
+
+        // ARD 方式キャリブレーション
+        private Quaternion _referenceSensorRotation = Quaternion.identity;
+        private Quaternion _initialLocalRotation    = Quaternion.identity;
+        private Quaternion _targetLocalRotation     = Quaternion.identity;
+        private bool _hasCalibration;
 
         // MoveCrosshair 用スムージングバッファ
         private Vector3 _smoothedPosition;
@@ -102,83 +116,113 @@ namespace OmiyaFes2026.Pose
         {
             _receiver   = GetComponent<UdpQuaternionReceiver>();
             _mainCamera = Camera.main;
+
+            if (aimTarget == null) aimTarget = transform;
+            _initialLocalRotation = aimTarget.localRotation;
+            _targetLocalRotation  = _initialLocalRotation;
         }
 
         private void Update()
         {
-            if (!_receiver.IsReceiving) return;
             if (aimTarget == null) return;
+            if (_receiver == null) return;
 
-            // ① iOS → Unity 座標系変換
-            Quaternion rawIos   = _receiver.LatestQuaternion;
-            Quaternion unityRot = QuaternionCoordinateConverter.IosToUnity(rawIos);
+            // 新しいパケットがあれば取得（変換済み・半球安定化済み）
+            Quaternion nextRotation;
+            if (!_receiver.ConsumeLatestRotation(out nextRotation))
+            {
+                // 新パケットなし → スムージングだけ適用して終了
+                ApplySmoothingToTarget();
+                return;
+            }
 
-            // ② キャリブレーションオフセットを差し引いて「基準からの相対回転」
-            Quaternion calibrated = Quaternion.Inverse(_calibrationOffset) * unityRot;
+            // 初回パケット 自動キャリブレーション
+            if (autoCalibrateOnFirstPacket && !_hasCalibration)
+            {
+                _referenceSensorRotation = nextRotation;
+                _hasCalibration = true;
+                Debug.Log("[PoseRotationDriver] ✅ 自動キャリブレーション（初回パケット）");
+            }
+
+            // 相対回転を算出
+            Quaternion relativeRotation = _hasCalibration
+                ? QuaternionCalibrationUtility.CalculateRelativeRotation(_referenceSensorRotation, nextRotation)
+                : nextRotation;
+
+            // iPhone 用の軸補正（ARD デフォルト: Yaw/Pitch を反転）
+            if (usePresetRelativeAxisCorrection
+                && _receiver.CoordinatePreset == QuaternionCoordinatePreset.IPhoneCoreMotion)
+            {
+                relativeRotation = QuaternionCoordinateConverter.ApplyRelativeAxisPreset(
+                    relativeRotation,
+                    _receiver.CoordinatePreset,
+                    iPhoneRelativeAxisSigns,
+                    androidRelativeAxisSigns);
+            }
+
+            // Yaw/Pitch を更新（UI / AimingController 用）
+            Vector3 euler = relativeRotation.eulerAngles;
+            CurrentYawDeg   = Mathf.DeltaAngle(0f, euler.y);
+            CurrentPitchDeg = Mathf.DeltaAngle(0f, euler.x);
 
             switch (controlMode)
             {
                 case ControlMode.RotateGun:
-                    ApplyRotateGun(calibrated);
+                    ApplyRotateGun(relativeRotation);
                     break;
-
                 case ControlMode.MoveCrosshair:
-                    ApplyMoveCrosshair(calibrated);
+                    ApplyMoveCrosshair(relativeRotation);
                     break;
             }
         }
 
         // ────────────────────────────────────────────────────────────
-        // MODE A: 銃の向きを直接制御
+        // MODE A: 銃の向きを直接制御（ARD 方式）
         // ────────────────────────────────────────────────────────────
 
-        private void ApplyRotateGun(Quaternion calibrated)
+        private void ApplyRotateGun(Quaternion relativeRotation)
         {
-            // スマホの姿勢をそのまま銃の Rotation に反映
-            aimTarget.rotation = calibrated;
+            Quaternion modelOffsetRot = Quaternion.Euler(modelEulerOffset);
+            _targetLocalRotation = _initialLocalRotation * relativeRotation * modelOffsetRot;
+            ApplySmoothingToTarget();
+        }
+
+        private void ApplySmoothingToTarget()
+        {
+            if (aimTarget == null) return;
+            if (rotationSmoothing > 0f)
+                aimTarget.localRotation = Quaternion.Slerp(aimTarget.localRotation, _targetLocalRotation, 1f - rotationSmoothing);
+            else
+                aimTarget.localRotation = _targetLocalRotation;
         }
 
         // ────────────────────────────────────────────────────────────
         // MODE B: 傾きを画面上の位置に変換して移動
         // ────────────────────────────────────────────────────────────
 
-        private void ApplyMoveCrosshair(Quaternion calibrated)
+        private void ApplyMoveCrosshair(Quaternion relativeRotation)
         {
-            // キャリブレーション済みクォータニオンから Euler 角を取り出す
-            // Unity の Euler は (-180, 180] の範囲
-            Vector3 euler = calibrated.eulerAngles;
+            float pitch = Mathf.DeltaAngle(0f, relativeRotation.eulerAngles.x);
+            float yaw   = Mathf.DeltaAngle(0f, relativeRotation.eulerAngles.y);
 
-            // Unity の eulerAngles は 0〜360 で返ってくるので -180〜180 に正規化
-            float pitch = NormalizeAngle(euler.x); // 上下（ピッチ）
-            float yaw   = NormalizeAngle(euler.y); // 左右（ヨー）
-
-            CurrentPitchDeg = pitch;
-            CurrentYawDeg   = yaw;
-
-            // -1〜1 に正規化（clamp）
             float normH =  Mathf.Clamp(yaw   / maxYawDeg,   -1f, 1f);
-            float normV = -Mathf.Clamp(pitch  / maxPitchDeg, -1f, 1f); // 上向きが+になるよう反転
+            float normV = -Mathf.Clamp(pitch  / maxPitchDeg, -1f, 1f);
 
-            // カメラの視野からワールド座標へ変換
             Camera cam = _mainCamera != null ? _mainCamera : Camera.main;
             if (cam == null) return;
 
-            // スクリーン中央 + 正規化オフセット → ワールド座標
             float halfW = Screen.width  * 0.5f;
             float halfH = Screen.height * 0.5f;
 
             float screenX = halfW + normH * halfW * sensitivityH;
             float screenY = halfH + normV * halfH * sensitivityV;
 
-            // スクリーン座標→ワールド座標（screenDepth m 先の平面）
             Vector3 screenPos = new Vector3(
-                Mathf.Clamp(screenX, 0, Screen.width),
-                Mathf.Clamp(screenY, 0, Screen.height),
-                screenDepth
-            );
+                Mathf.Clamp(screenX, 0f, Screen.width),
+                Mathf.Clamp(screenY, 0f, Screen.height),
+                screenDepth);
             Vector3 targetWorldPos = cam.ScreenToWorldPoint(screenPos);
 
-            // スムージング
             if (!_positionInitialized)
             {
                 _smoothedPosition    = targetWorldPos;
@@ -189,48 +233,42 @@ namespace OmiyaFes2026.Pose
                 _smoothedPosition = Vector3.Lerp(targetWorldPos, _smoothedPosition, smoothing);
             }
 
-            // aimTarget の位置を更新
             aimTarget.position = _smoothedPosition;
 
-            // 銃口はカメラ方向を向かせる（レイが前方に飛ぶように）
             Vector3 dir = _smoothedPosition - cam.transform.position;
             if (dir.sqrMagnitude > 0.001f)
                 aimTarget.rotation = Quaternion.LookRotation(dir.normalized);
         }
 
         // ────────────────────────────────────────────────────────────
-        // 公開メソッド
+        // 公開メソッド（キャリブレーション）
         // ────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// 現在のスマホの向きをキャリブレーション基準点として保存する。
-        /// 呼び出した瞬間の向きが「正面（中央）」となる。
+        /// ARD 方式キャリブレーションリセット。
         /// PoseCalibrationCoordinator から C キーで呼ばれる。
+        /// 次の受信パケットをリファレンスとして保存し直す。
         /// </summary>
-        public void Calibrate()
+        public void ResetCalibration()
         {
-            if (!_receiver.IsReceiving)
-            {
-                Debug.LogWarning("[PoseRotationDriver] ZIG SIM 未受信中のためキャリブレーション不可");
-                return;
-            }
+            _hasCalibration      = false;
+            _positionInitialized = false;
+            _targetLocalRotation = _initialLocalRotation;
+            if (aimTarget != null)
+                aimTarget.localRotation = _initialLocalRotation;
 
-            _calibrationOffset   = QuaternionCoordinateConverter.IosToUnity(_receiver.LatestQuaternion);
-            _positionInitialized = false; // スムージングもリセット
-            Debug.Log("[PoseRotationDriver] ✅ キャリブレーション完了");
+            if (_receiver != null)
+                _receiver.ClearPendingRotation();
+
+            Debug.Log("[PoseRotationDriver] 🔄 キャリブレーションリセット → 次のパケットで自動キャリブレーション");
         }
 
-        // ────────────────────────────────────────────────────────────
-        // ユーティリティ
-        // ────────────────────────────────────────────────────────────
+        /// <summary>後方互換ラッパー。旧来の Calibrate() 呼び出し元が壊れないよう残す。</summary>
+        public void Calibrate() => ResetCalibration();
 
-        /// <summary>0〜360 の角度を -180〜180 に変換する</summary>
-        private static float NormalizeAngle(float angle)
-        {
-            while (angle >  180f) angle -= 360f;
-            while (angle < -180f) angle += 360f;
-            return angle;
-        }
+        // ────────────────────────────────────────────────────────────
+        // Gizmos
+        // ────────────────────────────────────────────────────────────
 
         private void OnDrawGizmosSelected()
         {

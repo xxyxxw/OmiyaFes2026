@@ -43,7 +43,20 @@ namespace OmiyaFes2026.Pose
         // ────────────────────────────────────────────────────────────
 
         [Header("受信設定")]
+        // ZIG SIM 側の送信先ポートと同じ値にすること
         [SerializeField] private int port = 50000;
+
+        [Header("座標変換設定（ARD互換）")]
+        [Tooltip("センサーの種類。ZIG SIM は IPhoneCoreMotion を選択")]
+        [SerializeField] private QuaternionCoordinatePreset coordinatePreset = QuaternionCoordinatePreset.IPhoneCoreMotion;
+        [Tooltip("右手系→左手系変換を行うか（通常 true）")]
+        [SerializeField] private bool convertHandedness = true;
+        [Tooltip("センサー→Unity の追加 Euler オフセット（通常 Vector3.zero）")]
+        [SerializeField] private Vector3 sensorToUnityEulerOffset = Vector3.zero;
+        [Tooltip("スマホ画面を下向き（face-down）に持つ場合 true。照準デバイスのような持ち方。")]
+        [SerializeField] private bool screenFaceDown = false;
+        [Tooltip("クォータニオンの半球ガタつきを安定化するか（推奨: true）")]
+        [SerializeField] private bool stabilizeQuaternionHemisphere = true;
 
         [Header("デバッグ設定")]
         [Tooltip("ONにすると受信パケットの詳細をConsoleに出力する")]
@@ -52,11 +65,15 @@ namespace OmiyaFes2026.Pose
         [SerializeField] private float debugReportInterval = 3f;
 
         // ────────────────────────────────────────────────────────────
-        // 公開プロパティ（OmiyaFes 互換）
+        // 公開プロパティ（OmiyaFes 互換 + ARD 互換）
         // ────────────────────────────────────────────────────────────
 
-        /// <summary>最後に受信したクォータニオン（生データ）</summary>
+        /// <summary>最後に受信した生クォータニオン（変換前）</summary>
         public Quaternion LatestQuaternion { get; private set; } = Quaternion.identity;
+        /// <summary>正規化・半球安定化後の生クォータニオン</summary>
+        public Quaternion LatestStabilizedRawRotation { get; private set; } = Quaternion.identity;
+        /// <summary>Unity 座標系に変換済みのクォータニオン（PoseRotationDriver が使う）</summary>
+        public Quaternion LatestConvertedRotation { get; private set; } = Quaternion.identity;
 
         /// <summary>今フレームにパケットを受信したか（GameStateManager が参照）</summary>
         public bool IsReceiving { get; private set; } = false;
@@ -66,6 +83,10 @@ namespace OmiyaFes2026.Pose
         public string LastSender { get; private set; } = "-";
         public string LastStatus { get; private set; } = "Waiting for UDP packets...";
         public DateTime LastReceivedTime { get; private set; } = DateTime.MinValue;
+
+        // ARD 互換プロパティ
+        public QuaternionCoordinatePreset CoordinatePreset => coordinatePreset;
+        public bool ScreenFaceDown => screenFaceDown;
 
         // ── デバッグ用（メインスレッド側でログを出す）────────────
         // 受信スレッドはDebug.Logを直接呼べないため、ここにキューして
@@ -95,13 +116,18 @@ namespace OmiyaFes2026.Pose
         // ────────────────────────────────────────────────────────────
 
         private readonly object _lock = new object();
-        private Socket _socket;        // UdpClientを完全廃止、生 Socket のみ使用
+        private Socket _socket;
         private Thread _receiveThread;
         private volatile bool _running;
 
-        // メインスレッドへの受け渡しバッファ
-        private Quaternion _pendingQuat = Quaternion.identity;
+        // メインスレッドへの受け渡しバッファ（生 + 変換済み）
+        private Quaternion _pendingQuat = Quaternion.identity;          // 変換済み pending
         private bool _hasPending;
+        private int _pendingRecenterRequests;  // タッチリセンター要求カウント（Interlocked）
+
+        // 半球安定化用
+        private Quaternion _lastNormalizedRaw = Quaternion.identity;
+        private bool _hasLastNormalizedRaw;
 
         // OSC コンポーネント組み立て用（Bundle内に個別成分が来る場合）
         private Vector4 _partialQuat;
@@ -126,9 +152,9 @@ namespace OmiyaFes2026.Pose
             {
                 if (_hasPending)
                 {
-                    LatestQuaternion = _pendingQuat;
-                    _hasPending = false;
-                    _lastPacketTime = Time.time;  // 受信時刻を更新
+                    // LatestQuaternion は受信スレッド側で更新済み
+                    _hasPending      = false;
+                    _lastPacketTime  = Time.time;
                 }
             }
 
@@ -192,6 +218,81 @@ namespace OmiyaFes2026.Pose
                     $"   姿勢:   x={LatestQuaternion.x:F3} y={LatestQuaternion.y:F3} " +
                     $"z={LatestQuaternion.z:F3} w={LatestQuaternion.w:F3}");
             }
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // ARD 互換 公開 API
+        // ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 新しいパケットがあれば変換済み回転を取得して true を返す（ARD互換）。
+        /// PoseRotationDriver.Update() から毎フレーム呼ぶ。
+        /// </summary>
+        public bool ConsumeLatestRotation(out Quaternion rotation)
+        {
+            lock (_lock)
+            {
+                if (!_hasPending)
+                {
+                    rotation = LatestConvertedRotation;
+                    return false;
+                }
+                rotation    = _pendingQuat;
+                _hasPending = false;
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// pending 状態を破棄し、最新の変換済み回転で上書きする（ARD互換）。
+        /// キャリブレーション直後のガクつき防止に使う。
+        /// </summary>
+        public void ClearPendingRotation()
+        {
+            lock (_lock)
+            {
+                _hasPending  = false;
+                _pendingQuat = LatestConvertedRotation;
+            }
+        }
+
+        /// <summary>
+        /// タッチによるリセンター要求があれば消費して true を返す（ARD互換）。
+        /// </summary>
+        public bool ConsumePendingRecenterRequest()
+        {
+            return Interlocked.Exchange(ref _pendingRecenterRequests, 0) > 0;
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // 半球安定化
+        // ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// 正規化 + 前フレームとの dot が負なら全符号反転し、
+        /// ガクつきを防ぐ（ARD互換）。
+        /// </summary>
+        private Quaternion StabilizeRawQuaternion(Quaternion q)
+        {
+            float mag = Mathf.Sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+            if (mag <= 0.000001f) return Quaternion.identity;
+
+            float inv = 1f / mag;
+            Quaternion normalized = new Quaternion(q.x*inv, q.y*inv, q.z*inv, q.w*inv);
+
+            if (stabilizeQuaternionHemisphere && _hasLastNormalizedRaw)
+            {
+                float dot = normalized.x * _lastNormalizedRaw.x
+                          + normalized.y * _lastNormalizedRaw.y
+                          + normalized.z * _lastNormalizedRaw.z
+                          + normalized.w * _lastNormalizedRaw.w;
+                if (dot < 0f)
+                    normalized = new Quaternion(-normalized.x, -normalized.y, -normalized.z, -normalized.w);
+            }
+
+            _lastNormalizedRaw    = normalized;
+            _hasLastNormalizedRaw = true;
+            return normalized;
         }
 
         // ────────────────────────────────────────────────────────────
@@ -293,9 +394,23 @@ namespace OmiyaFes2026.Pose
 
                     if (result.Succeeded && result.HasCompleteQuaternion)
                     {
+                        // ARD と同じパイプライン:
+                        // 生 Quat → 半球安定化 → ConvertToUnity
+                        Quaternion rawQ  = result.Quaternion;
+                        Quaternion stabQ = StabilizeRawQuaternion(rawQ);
+                        Quaternion convQ = QuaternionCoordinateConverter.ConvertToUnity(
+                            stabQ,
+                            coordinatePreset,
+                            sensorToUnityEulerOffset,
+                            convertHandedness,
+                            screenFaceDown);
+
                         lock (_lock)
                         {
-                            _pendingQuat = result.Quaternion;
+                            LatestQuaternion             = rawQ;   // 後方互換: 生データ
+                            LatestStabilizedRawRotation  = stabQ;
+                            LatestConvertedRotation      = convQ;
+                            _pendingQuat = convQ;  // 変換済みを pendingへ
                             _hasPending  = true;
                             ReceivedPacketCount++;
                             LastSender       = remoteEP.ToString();

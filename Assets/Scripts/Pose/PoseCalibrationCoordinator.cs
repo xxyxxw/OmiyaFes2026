@@ -3,40 +3,61 @@ using UnityEngine;
 namespace OmiyaFes2026.Pose
 {
     /// <summary>
-    /// Cキーでジャイロのキャリブレーションを実行する。
+    /// ARD 方式のキャリブレーション調整役。
+    /// - C キーで ResetCalibration() を呼ぶ
+    /// - スマホタッチによる ConsumePendingRecenterRequest() にも対応
     /// </summary>
-    [RequireComponent(typeof(PoseRotationDriver))] // 同 GameObject に PoseRotationDriver が必須
+    [AddComponentMenu("OmiyaFes/Pose Calibration Coordinator")]
     public class PoseCalibrationCoordinator : MonoBehaviour
     {
-        // ────────────────────────────────────────────────────────────
-        // インスペクター設定フィールド
-        // ────────────────────────────────────────────────────────────
+        [Tooltip("キャリブレーションをトリガーするキー（デフォルト: C）")]
+        [SerializeField] private KeyCode recenterKey = KeyCode.C;
 
-        // キャリブレーションをトリガーするキー（デフォルト: C）
-        [SerializeField] private KeyCode calibrationKey = KeyCode.C;
-
-        // ────────────────────────────────────────────────────────────
-        // 内部参照
-        // ────────────────────────────────────────────────────────────
-
-        private PoseRotationDriver _driver; // 同 GameObject の PoseRotationDriver
-
-        // ────────────────────────────────────────────────────────────
-        // Unity ライフサイクル
-        // ────────────────────────────────────────────────────────────
+        // 参照は自動解決 + Inspector 手動指定の両方に対応
+        [SerializeField] private UdpQuaternionReceiver receiver;
+        [SerializeField] private PoseRotationDriver    driver;
 
         private void Awake()
         {
-            _driver = GetComponent<PoseRotationDriver>();
+            ResolveReferences();
+        }
+
+        private void OnValidate()
+        {
+            ResolveReferences();
         }
 
         private void Update()
         {
-            // 設定したキーが押された瞬間にキャリブレーションを実行
-            if (Input.GetKeyDown(calibrationKey))
+            // C キーでリキャリブレーション
+            if (Input.GetKeyDown(recenterKey))
             {
-                _driver.Calibrate();
+                ResetAllCalibration();
             }
+
+            // スマホタッチによるリセンター要求（ConsumePendingRecenterRequest）
+            if (receiver != null && receiver.ConsumePendingRecenterRequest())
+            {
+                ResetAllCalibration();
+            }
+        }
+
+        /// <summary>全コンポーネントのキャリブレーションをリセットする。</summary>
+        public void ResetAllCalibration()
+        {
+            if (driver != null)
+                driver.ResetCalibration();
+
+            Debug.Log("[PoseCalibrationCoordinator] ✅ キャリブレーションリセット完了");
+        }
+
+        /// <summary>後方互換: 旧 Calibrate() 呼び出しのラッパー</summary>
+        public void Calibrate() => ResetAllCalibration();
+
+        private void ResolveReferences()
+        {
+            if (receiver == null) receiver = GetComponent<UdpQuaternionReceiver>();
+            if (driver   == null) driver   = GetComponent<PoseRotationDriver>();
         }
     }
 }

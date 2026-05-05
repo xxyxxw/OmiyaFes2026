@@ -7,22 +7,25 @@
 - [x] キャリブレーション機能（Calibrate() / C キー）
 - [x] デバッグオーバーレイ（PoseDebugOverlay）
 - [x] ZIG SIM UDP 通信の疎通確認（ファイアウォール設定含む）
-- [x] 座標系変換修正：`IosToUnity()` を `(-x, -y, z, w)` に変更
-- [x] **PoseRotationDriver 全面書き直し**：MoveCrosshair モードを追加し、スマホの傾き→銃の横・縦移動に対応
-- [x] **GunAimVisualizer 新規作成**：LineRenderer でレイをゲーム画面に表示
+- [x] GunAimVisualizer 新規作成（LineRenderer でレイをゲーム画面に表示）
+- [x] **ARD 完全移植（2026-05-05）**：
+  - `QuaternionCoordinateConverter` → LookRotation ベース・半球安定化・IosToUnity後方互換
+  - `QuaternionCalibrationUtility` → 新規作成（`CalculateRelativeRotation`）
+  - `UdpQuaternionReceiver` → `ConsumeLatestRotation` / `ClearPendingRotation` / `ConsumePendingRecenterRequest` / `StabilizeRawQuaternion` 追加・受信ループで `ConvertToUnity` 適用
+  - `PoseRotationDriver` → ARD 方式（`initialLocalRotation * relativeRotation * modelOffset`）・autoCalibrateOnFirstPacket・rotationSmoothing・`ResetCalibration()`
+  - `PoseCalibrationCoordinator` → ARD 方式（ResetCalibration + ConsumePendingRecenterRequest）
 
 ## 🔄 進行中
 
-- [ ] Unity で動作確認
-  - PoseRotationDriver の `controlMode` を `MoveCrosshair` に設定
-  - `aimTarget` に銃オブジェクト（または空のTransform）を設定
-  - GunAimVisualizer を銃オブジェクトに追加
-  - ZIG SIM で接続 → スマホを振って銃が横・縦に動くか確認
-  - C キーでキャリブレーション
+- [ ] **Unity で実機確認**
+  - Inspector で `coordinatePreset = IPhoneCoreMotion`、`screenFaceDown = false` を確認
+  - ZIG SIM 接続 → ReceivedPacketCount が増えるか確認
+  - C キーでキャリブレーション → スマホを左右/上下に向けて aimTarget が追従するか
+  - `controlMode = RotateGun` が推奨（初回はこちらで挙動確認）
 
 ## 📋 未着手
 
-- [ ] インク弾の発射ロジック（InkGun の動作確認）
+- [ ] インク弾の発射ロジック確認（InkGun の `aimTransform.forward` が正しく飛ぶか）
 - [ ] ペイント対象オブジェクトへのテクスチャ描画
 - [ ] スポーン管理（InkObjectSpawner の調整）
 - [ ] ゲームUI（スコア・残弾・タイマー）
@@ -33,24 +36,43 @@
 
 ## 📝 設計メモ
 
-### PoseRotationDriver の制御モード（2026-05-05 追加）
+### ARD 移植後の処理パイプライン（2026-05-05）
 
-| モード | 挙動 | 用途 |
-|---|---|---|
-| `RotateGun` | スマホの向きで銃の Rotation を直接制御 | 姿勢をそのまま反映したい場合 |
-| `MoveCrosshair` | スマホの傾き角度を画面上のXY位置に変換してaimTargetを移動 | **銃を横・縦に移動させたい場合（今回の要件）** |
-
-### MoveCrosshair モードの調整パラメータ
-
-| パラメータ | 説明 | 推奨値 |
-|---|---|---|
-| `sensitivityH/V` | 感度（大きいほど少ない傾きで端まで動く） | 2〜4 |
-| `maxYawDeg` | 左右の最大角度（これ以上傾けても端で止まる） | 30〜50° |
-| `maxPitchDeg` | 上下の最大角度 | 20〜40° |
-| `smoothing` | スムージング（0=即時, 0.1=自然, 0.5=遅め） | 0.05〜0.15 |
-| `screenDepth` | 銃が動く平面のカメラからの距離（m） | 5〜15 |
-
-### 座標系変換（確定版）
 ```
-IosToUnity: new Quaternion(-ios.x, -ios.y, ios.z, ios.w)
+ZIG SIM (UDP) → UdpQuaternionReceiver
+  └─ パース → StabilizeRawQuaternion（正規化・半球安定化）
+  └─ ConvertToUnity(IPhoneCoreMotion, LookRotationベース)
+  └─ LatestConvertedRotation / _pendingQuat（変換済み）
+        ↓
+PoseRotationDriver.Update()
+  └─ ConsumeLatestRotation() で変換済みQuat取得
+  └─ 初回 or リセット → referenceSensorRotation に保存
+  └─ CalculateRelativeRotation(ref, current) → 相対回転
+  └─ ApplyRelativeAxisPreset（iPhone軸補正: -1,-1,1）
+  └─ initialLocalRotation * relativeRotation * modelOffset
+  └─ aimTarget.localRotation に適用（Slerp or 即時）
+        ↓
+InkGun → aimTransform.forward で弾を発射
+```
+
+### Inspector 推奨設定
+
+| 項目 | 推奨値 |
+|---|---|
+| `coordinatePreset` | `IPhoneCoreMotion` |
+| `screenFaceDown` | `false`（銃のような横向き持ち） |
+| `stabilizeQuaternionHemisphere` | `true` |
+| `autoCalibrateOnFirstPacket` | `true` |
+| `rotationSmoothing` | `0`（即時）〜`0.1`（滑らか） |
+| `iPhoneRelativeAxisSigns` | `(-1, -1, 1)`（ARD デフォルト） |
+| `controlMode` | `RotateGun`（まず確認） |
+
+### 座標系変換（ARD 移植後）
+```
+生 Quat → StabilizeRawQuaternion（w<0なら全符号反転）
+→ ConvertIPhoneCoreMotion:
+    deviceTop = RotateVector(q, Vector3.up)
+    deviceScreenOut = RotateVector(q, Vector3.forward)
+    → LookRotation(deviceTop.normalized, -deviceScreenOut.normalized)
+→ Euler オフセット適用
 ```
