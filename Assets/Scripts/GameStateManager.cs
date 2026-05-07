@@ -212,6 +212,16 @@ namespace OmiyaFes2026
             RemainingTime    = gameDuration;
             _inactivityTimer = 0f;
             OnReset?.Invoke();
+
+            // ── シーン内の全 PaintTarget のインクをリセット ──────────
+            // 壁・浮遊オブジェクト・どんなオブジェクトでも一括クリア
+            PaintTarget[] allTargets = FindObjectsOfType<PaintTarget>();
+            foreach (var pt in allTargets)
+                pt.ClearPaint();
+
+            if (allTargets.Length > 0)
+                Debug.Log($"[GameStateManager] インクリセット: {allTargets.Length} 個の PaintTarget をクリアしました");
+
             Debug.Log("[GameStateManager] リセット → 待機状態");
         }
     }

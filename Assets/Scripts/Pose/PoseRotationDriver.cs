@@ -5,13 +5,16 @@ namespace OmiyaFes2026.Pose
     /// <summary>
     /// スマホジャイロ（ZIG SIM）で照準を制御するドライバー。
     ///
-    /// ▼ 精度改善ポイント（v2）
-    ///   1. キャリブレーション平均化: 初回パケット1フレームではなく calibAverageFrames フレーム分を
-    ///      Slerp 積算して基準姿勢を安定させる（小刻みな動きの影響を排除）
-    ///   2. 入力クォータニオンのローパスフィルタ: 受信直後にノイズ除去 Slerp をかけ、
-    ///      高周波ジッターを除去しつつ追従性を保つ
-    ///   3. 出力スムージング: aimTarget への適用前にもう一段 Slerp をかけ
-    ///      ガクつきを最終段でも除去する
+    /// ▼ ARD互換モード（useArdCompatibleMode = true）
+    ///   - 入力ローパスなし（inputLowPassAlpha = 0 相当）
+    ///   - 出力スムージングなし（rotationSmoothing = 0 相当）
+    ///   - 最初のパケット 1 フレームで即キャリブ完了（ARD と同じ）
+    ///   - screenFaceDown = true と組み合わせて使うこと
+    ///
+    /// ▼ 精度改善ポイント（通常モード）
+    ///   1. キャリブレーション平均化: calibAverageFrames フレーム分を Slerp 積算
+    ///   2. 入力クォータニオンのローパスフィルタ: 高周波ジッター除去
+    ///   3. 出力スムージング: aimTarget 適用前に一段 Slerp
     ///
     /// ▼ 左右が逆 → Inspector で invertLeftRight を ON
     /// ▼ 上下が逆 → Inspector で invertUpDown を ON
@@ -22,33 +25,47 @@ namespace OmiyaFes2026.Pose
     {
         public enum ControlMode
         {
+            /// <summary>スマホの向き = 銃の向き（1:1直接マッピング。推奨）</summary>
+            DirectMapping,
             RotateGun,
             MoveCrosshair,
+            RotateAndMove,
         }
 
         // ────────────────────────────────────────────────────────────
         // Inspector 設定
         // ────────────────────────────────────────────────────────────
 
+        [Header("ARD互換モード（推奨: ON）")]
+        [Tooltip("true にすると ARD と同じ挙動（ローパス無効・スムージング0・即時キャリブ）になる。\n" +
+                 "UdpQuaternionReceiver の screenFaceDown = true と合わせて使うこと。")]
+        [SerializeField] private bool useArdCompatibleMode = true;
+
         [Header("制御モード")]
-        [SerializeField] private ControlMode controlMode = ControlMode.RotateGun;
+        [Tooltip(
+            "DirectMapping = スマホの向き=銃の向き 1:1直接（推奨）\n" +
+            "RotateGun    = 回転のみ\n" +
+            "MoveCrosshair = 位置のみ\n" +
+            "RotateAndMove = 回転+位置")]
+        [SerializeField] private ControlMode controlMode = ControlMode.DirectMapping;
 
         [Header("照準対象 Transform")]
+        [Tooltip("スマホ姿勢で回転させる照準 Transform（AimRoot など）。null なら自動で this.transform を使うが Warning が出る。")]
         [SerializeField] private Transform aimTarget;
 
         [Header("キャリブレーション設定")]
         [Tooltip("最初のパケット受信時に自動キャリブレーションするか")]
         [SerializeField] private bool autoCalibrateOnFirstPacket = true;
 
-        [Tooltip("キャリブレーション基準姿勢を何フレーム分で平均化するか（大きいほど安定。推奨: 10〜30）")]
+        [Tooltip("キャリブレーション基準姿勢を何フレーム分で平均化するか（ARD互換モードでは無視・常に1）")]
         [SerializeField] [Range(1, 60)] private int calibAverageFrames = 20;
 
-        [Header("入力ローパスフィルタ（ジッター除去）")]
-        [Tooltip("受信クォータニオンに掛けるSLERPローパスフィルタ係数（0=フィルタなし、1に近いほど強い平滑化）")]
+        [Header("入力ローパスフィルタ（通常モードのみ有効）")]
+        [Tooltip("受信クォータニオンのSLERPローパス係数（0=フィルタなし、ARD互換モードでは無視）")]
         [SerializeField] [Range(0f, 0.99f)] private float inputLowPassAlpha = 0.15f;
 
-        [Header("出力スムージング")]
-        [Tooltip("aimTargetへの適用時のスムージング量（0=即時、0.95で非常に滑らか）")]
+        [Header("出力スムージング（通常モードのみ有効）")]
+        [Tooltip("aimTargetへの適用時スムージング量（0=即時、ARD互換モードでは無視）")]
         [SerializeField] [Range(0f, 0.99f)] private float rotationSmoothing = 0f;
 
         [Header("モデル補正")]
@@ -72,6 +89,10 @@ namespace OmiyaFes2026.Pose
 
         [Header("デバッグ")]
         [SerializeField] private bool showDebugGizmos = true;
+        [Tooltip("ON にすると毎フレーム詳細ログを Console に出力する（重いので確認後は OFF に）")]
+        [SerializeField] private bool verboseDebugLog = false;
+        [Tooltip("詳細ログを何フレームおきに出力するか（verboseDebugLog=true のとき有効）")]
+        [SerializeField] [Range(1, 300)] private int verboseLogInterval = 30;
 
         // ────────────────────────────────────────────────────────────
         // 公開プロパティ
@@ -80,6 +101,8 @@ namespace OmiyaFes2026.Pose
         public Transform AimTarget => aimTarget;
         public float CurrentYawDeg   { get; private set; }
         public float CurrentPitchDeg { get; private set; }
+        /// <summary>最後に適用した targetLocalRotation の Euler（デバッグ用）</summary>
+        public Vector3 DebugRelativeEuler { get; private set; }
 
         // ────────────────────────────────────────────────────────────
         // 内部状態
@@ -90,13 +113,13 @@ namespace OmiyaFes2026.Pose
 
         // キャリブレーション
         private Quaternion _referenceSensorRotation = Quaternion.identity;
-        private Quaternion _calibAccumulator         = Quaternion.identity; // 平均化用
+        private Quaternion _calibAccumulator         = Quaternion.identity;
         private int        _calibFrameCount          = 0;
         private bool       _hasCalibration           = false;
         private bool       _calibrating              = false;
 
         // ローパスフィルタ状態
-        private Quaternion _filteredInput  = Quaternion.identity; // 低域フィルタ済みQuat
+        private Quaternion _filteredInput    = Quaternion.identity;
         private bool       _hasFilteredInput = false;
 
         // 出力
@@ -107,6 +130,10 @@ namespace OmiyaFes2026.Pose
         private Vector3 _smoothedPosition;
         private bool    _positionInitialized;
 
+        // デバッグ用
+        private int _frameCount = 0;
+        private bool _aimTargetWarningEmitted = false;
+
         // ────────────────────────────────────────────────────────────
         // Unity ライフサイクル
         // ────────────────────────────────────────────────────────────
@@ -116,66 +143,131 @@ namespace OmiyaFes2026.Pose
             _receiver   = GetComponent<UdpQuaternionReceiver>();
             _mainCamera = Camera.main;
 
-            if (aimTarget == null) aimTarget = transform;
+            // aimTarget 未設定の場合は this.transform にフォールバックし、Warning を出す
+            if (aimTarget == null)
+            {
+                Debug.LogWarning(
+                    "[PoseRotationDriver] ⚠ aimTarget が未設定です。this.transform にフォールバックします。\n" +
+                    "Inspector で AimRoot などの専用 Transform を設定することを強く推奨します。", this);
+                aimTarget = transform;
+                _aimTargetWarningEmitted = true;
+            }
+
             _initialLocalRotation = aimTarget.localRotation;
             _targetLocalRotation  = _initialLocalRotation;
+
+            // 起動時の設定を出力
+            Debug.Log(
+                $"[PoseRotationDriver] 起動設定\n" +
+                $"  useArdCompatibleMode   = {useArdCompatibleMode}\n" +
+                $"  controlMode            = {controlMode}\n" +
+                $"  autoCalibrateOnFirst   = {autoCalibrateOnFirstPacket}\n" +
+                $"  calibAverageFrames     = {(useArdCompatibleMode ? 1 : calibAverageFrames)} " +
+                    $"{(useArdCompatibleMode ? "(ARD互換モードで上書き)" : "")}\n" +
+                $"  inputLowPassAlpha      = {(useArdCompatibleMode ? 0f : inputLowPassAlpha)} " +
+                    $"{(useArdCompatibleMode ? "(ARD互換モードで無効化)" : "")}\n" +
+                $"  rotationSmoothing      = {(useArdCompatibleMode ? 0f : rotationSmoothing)} " +
+                    $"{(useArdCompatibleMode ? "(ARD互換モードで無効化)" : "")}\n" +
+                $"  aimTarget              = {aimTarget.name}");
         }
 
         private void Update()
         {
-            if (aimTarget == null || _receiver == null) return;
+            _frameCount++;
+
+            // aimTarget null チェック（実行中に消えた場合）
+            if (aimTarget == null)
+            {
+                if (!_aimTargetWarningEmitted)
+                {
+                    Debug.LogWarning("[PoseRotationDriver] ⚠ aimTarget が null になりました。", this);
+                    _aimTargetWarningEmitted = true;
+                }
+                return;
+            }
+
+            if (_receiver == null) return;
+
+            // ── キャリブレーションキー入力 ────────────────────────────
+            // C キーで現在姿勢を基準にリキャリブ（Space はゲーム開始に使用済みのため除外）
+            if (Input.GetKeyDown(KeyCode.C))
+            {
+                Debug.Log("[PoseRotationDriver] 🎯 手動キャリブレーション実行 (C キー)");
+                ResetCalibration();
+            }
+
+            // ── ARD互換モード: 有効フィルタ係数の上書き ─────────────
+            float effectiveLowPass  = useArdCompatibleMode ? 0f : inputLowPassAlpha;
+            float effectiveSmooth   = useArdCompatibleMode ? 0f : rotationSmoothing;
+            int   effectiveCalibFrames = useArdCompatibleMode ? 1 : calibAverageFrames;
 
             Quaternion nextRaw;
             if (!_receiver.ConsumeLatestRotation(out nextRaw))
             {
-                // 新パケットなし → スムージングのみ適用
-                ApplySmoothingToTarget();
+                // 新パケットなし → スムージングのみ
+                ApplySmoothingToTarget(effectiveSmooth);
                 return;
             }
 
             // ── ① 入力ローパスフィルタ ──────────────────────────────
-            // 高周波ジッターをSLERPで抑制。inputLowPassAlpha=0ならフィルタなし。
-            Quaternion filtered = ApplyInputLowPass(nextRaw);
+            Quaternion filtered = ApplyInputLowPass(nextRaw, effectiveLowPass);
 
             // ── ② キャリブレーション平均化 ──────────────────────────
             if (autoCalibrateOnFirstPacket && !_hasCalibration)
             {
-                AccumulateCalibration(filtered);
-                ApplySmoothingToTarget();
-                return; // キャリブレーション中は照準を動かさない
+                AccumulateCalibration(filtered, effectiveCalibFrames);
+                ApplySmoothingToTarget(effectiveSmooth);
+                return;
             }
 
-            // ── ③ 反転補正（1回だけ Euler で適用）────────────────────
+            // ── ③ 相対回転の計算 ────────────────────────────────────
             Quaternion relativeRotation = _hasCalibration
                 ? QuaternionCalibrationUtility.CalculateRelativeRotation(_referenceSensorRotation, filtered)
                 : filtered;
 
+            // ── ④ 反転補正 ──────────────────────────────────────────
             if (invertLeftRight || invertUpDown)
             {
-                Vector3 eu  = relativeRotation.eulerAngles;
-                float pitch = Mathf.DeltaAngle(0f, eu.x);
-                float yaw   = Mathf.DeltaAngle(0f, eu.y);
-                float roll  = Mathf.DeltaAngle(0f, eu.z);
+                Vector3 eu    = relativeRotation.eulerAngles;
+                float   pitch = Mathf.DeltaAngle(0f, eu.x);
+                float   yaw   = Mathf.DeltaAngle(0f, eu.y);
+                float   roll  = Mathf.DeltaAngle(0f, eu.z);
                 relativeRotation = Quaternion.Euler(
                     invertUpDown    ? -pitch : pitch,
                     invertLeftRight ? -yaw   : yaw,
                     roll);
             }
 
-            // ── ④ 公開プロパティ更新 ──────────────────────────────────
-            Vector3 e       = relativeRotation.eulerAngles;
-            CurrentYawDeg   = Mathf.DeltaAngle(0f, e.y);
-            CurrentPitchDeg = Mathf.DeltaAngle(0f, e.x);
+            // ── ⑤ 公開プロパティ更新 ────────────────────────────────
+            Vector3 eu2       = relativeRotation.eulerAngles;
+            CurrentYawDeg     = Mathf.DeltaAngle(0f, eu2.y);
+            CurrentPitchDeg   = Mathf.DeltaAngle(0f, eu2.x);
+            DebugRelativeEuler = new Vector3(
+                Mathf.DeltaAngle(0f, eu2.x),
+                Mathf.DeltaAngle(0f, eu2.y),
+                Mathf.DeltaAngle(0f, eu2.z));
 
-            // ── ⑤ モード別処理 ──────────────────────────────────────
+            // ── ⑥ モード別処理 ──────────────────────────────────────
             switch (controlMode)
             {
+                case ControlMode.DirectMapping:
+                    ApplyDirectMapping(relativeRotation);
+                    break;
                 case ControlMode.RotateGun:
-                    ApplyRotateGun(relativeRotation);
+                    ApplyRotateGun(relativeRotation, effectiveSmooth);
                     break;
                 case ControlMode.MoveCrosshair:
                     ApplyMoveCrosshair(relativeRotation);
                     break;
+                case ControlMode.RotateAndMove:
+                    ApplyRotateAndMove(relativeRotation, effectiveSmooth);
+                    break;
+            }
+
+            // ── ⑦ 詳細デバッグログ ──────────────────────────────────
+            if (verboseDebugLog && (_frameCount % verboseLogInterval == 0))
+            {
+                EmitVerboseDebugLog(nextRaw, filtered, relativeRotation);
             }
         }
 
@@ -183,23 +275,15 @@ namespace OmiyaFes2026.Pose
         // ① 入力ローパスフィルタ
         // ────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// 指数移動平均的なSLERP ローパスフィルタ。
-        /// alpha が大きいほど平滑化が強く（追従が遅い）、
-        /// 0 なら即値（フィルタなし）。
-        /// </summary>
-        private Quaternion ApplyInputLowPass(Quaternion raw)
+        private Quaternion ApplyInputLowPass(Quaternion raw, float alpha)
         {
-            if (inputLowPassAlpha <= 0f || !_hasFilteredInput)
+            if (alpha <= 0f || !_hasFilteredInput)
             {
                 _filteredInput    = raw;
                 _hasFilteredInput = true;
                 return raw;
             }
-
-            // Slerp(raw, filtered, alpha) ≒ 低域通過フィルタ
-            // alpha=0.15 → 約85%を今回の値にすることで素早く追従しつつノイズを抑制
-            _filteredInput = Quaternion.Slerp(raw, _filteredInput, inputLowPassAlpha);
+            _filteredInput = Quaternion.Slerp(raw, _filteredInput, alpha);
             return _filteredInput;
         }
 
@@ -207,15 +291,10 @@ namespace OmiyaFes2026.Pose
         // ② キャリブレーション平均化
         // ────────────────────────────────────────────────────────────
 
-        /// <summary>
-        /// calibAverageFrames フレーム分のクォータニオンを SLERP 積算して
-        /// 安定したキャリブレーション基準姿勢を求める。
-        /// </summary>
-        private void AccumulateCalibration(Quaternion q)
+        private void AccumulateCalibration(Quaternion q, int targetFrames)
         {
             if (!_calibrating)
             {
-                // 初回 → 積算開始
                 _calibAccumulator = q;
                 _calibFrameCount  = 1;
                 _calibrating      = true;
@@ -223,40 +302,121 @@ namespace OmiyaFes2026.Pose
             }
             else
             {
-                // Slerp で重み付き平均: 均等ウェイト = 1/(n+1)
                 float t = 1f / (_calibFrameCount + 1);
                 _calibAccumulator = Quaternion.Slerp(_calibAccumulator, q, t);
                 _calibFrameCount++;
             }
 
-            if (_calibFrameCount >= calibAverageFrames)
+            if (_calibFrameCount >= targetFrames)
             {
                 _referenceSensorRotation = _calibAccumulator;
                 _hasCalibration          = true;
                 _calibrating             = false;
-                Debug.Log($"[PoseRotationDriver] ✅ キャリブレーション完了（{calibAverageFrames}フレーム平均）");
+                string mode = targetFrames <= 1 ? "ARD互換・即時" : $"{targetFrames}フレーム平均";
+                Debug.Log(
+                    $"[PoseRotationDriver] ✅ キャリブレーション完了（{mode}）\n" +
+                    $"  referenceSensorRotation = {_referenceSensorRotation.eulerAngles}");
             }
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // MODE DirectMapping: スマホの向き = 銃の向き（1:1直接）
+        // ────────────────────────────────────────────────────────────
+        // ・position は一切変えない（銃は固定位置）
+        // ・rotation だけをスマホの姿勢に直接対応させる
+        // ・スムージングなし → 遅延ゼロで最もダイレクトな操作感
+        // ─────────────────────────────────────────────────────────────
+
+        private void ApplyDirectMapping(Quaternion relativeRotation)
+        {
+            Quaternion modelOffsetRot = Quaternion.Euler(modelEulerOffset);
+            // 初期姿勢 × 相対回転 × モデル補正 → localRotation に直接適用
+            aimTarget.localRotation = _initialLocalRotation * relativeRotation * modelOffsetRot;
+            // _targetLocalRotation も更新（ResetCalibration で参照される）
+            _targetLocalRotation = aimTarget.localRotation;
         }
 
         // ────────────────────────────────────────────────────────────
         // MODE A: 銃の向きを直接制御（ARD 方式）
         // ────────────────────────────────────────────────────────────
 
-        private void ApplyRotateGun(Quaternion relativeRotation)
+        private void ApplyRotateGun(Quaternion relativeRotation, float smooth)
         {
-            Quaternion modelOffsetRot = Quaternion.Euler(modelEulerOffset);
+            Quaternion modelOffsetRot  = Quaternion.Euler(modelEulerOffset);
             _targetLocalRotation = _initialLocalRotation * relativeRotation * modelOffsetRot;
-            ApplySmoothingToTarget();
+            ApplySmoothingToTarget(smooth);
         }
 
-        private void ApplySmoothingToTarget()
+        private void ApplySmoothingToTarget(float smooth)
         {
             if (aimTarget == null) return;
-            if (rotationSmoothing > 0f)
+            if (smooth > 0f)
                 aimTarget.localRotation = Quaternion.Slerp(
-                    aimTarget.localRotation, _targetLocalRotation, 1f - rotationSmoothing);
+                    aimTarget.localRotation, _targetLocalRotation, 1f - smooth);
             else
                 aimTarget.localRotation = _targetLocalRotation;
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // MODE C: 回転 + 位置両方（推奨）
+        // ────────────────────────────────────────────────────────────────
+
+        private void ApplyRotateAndMove(Quaternion relativeRotation, float smooth)
+        {
+            Camera cam = _mainCamera != null ? _mainCamera : Camera.main;
+            if (cam == null)
+            {
+                ApplyRotateGun(relativeRotation, smooth);
+                return;
+            }
+
+            // ── Euler角ではなく forward ベクトルの X/Y で偏差を計算 ──────────
+            // Euler角(eulerAngles)は gimbal lock の影響で「右へ動かして戻す」と
+            // 元の値に戻らないことがある。forward ベクトルを使えばこの問題が消える。
+            //
+            // relativeRotation = Inverse(基準) * 現在
+            // → 基準姿勢のときは Identity → forward = (0, 0, 1)
+            // → 右に傾けると forward.x > 0、戻せば forward.x = 0 に必ず戻る
+            Vector3 fwd = relativeRotation * Vector3.forward;
+
+            // Atan2 で角度を求める（sin近似より正確、大きい角でも安定）
+            float yawRad   =  Mathf.Atan2(fwd.x, fwd.z);   // 右 = 正
+            float pitchRad =  Mathf.Atan2(fwd.y, fwd.z);   // 上 = 正（マイナス除去）
+
+            // maxYawDeg / maxPitchDeg を基準に -1〜1 に正規化
+            float normH = Mathf.Clamp(yawRad   / (maxYawDeg   * Mathf.Deg2Rad), -1f, 1f);
+            float normV = Mathf.Clamp(pitchRad / (maxPitchDeg * Mathf.Deg2Rad), -1f, 1f);
+
+            // ── クロスヘア位置: cam.right/up のみ使用 → Z方向移動なし ────────
+            float fovRad     = cam.fieldOfView * 0.5f * Mathf.Deg2Rad;
+            float halfHeight = screenDepth * Mathf.Tan(fovRad);
+            float halfWidth  = halfHeight * cam.aspect;
+
+            Vector3 centerPoint = cam.transform.position
+                                + cam.transform.forward * screenDepth;
+
+            Vector3 targetWorldPos = centerPoint
+                + cam.transform.right * (normH * halfWidth  * sensitivityH)
+                + cam.transform.up    * (normV * halfHeight * sensitivityV);
+
+            // スムージング
+            if (!_positionInitialized)
+            {
+                _smoothedPosition    = targetWorldPos;
+                _positionInitialized = true;
+            }
+            else
+            {
+                _smoothedPosition = Vector3.Lerp(targetWorldPos, _smoothedPosition, smoothing);
+            }
+
+            // 照準オブジェクトの位置を更新（上下左右のみ、前後なし）
+            aimTarget.position = _smoothedPosition;
+
+            // 照準の向きをカメラ→クロスヘア方向に合わせる
+            Vector3 shootDir = _smoothedPosition - cam.transform.position;
+            if (shootDir.sqrMagnitude > 0.001f)
+                aimTarget.rotation = Quaternion.LookRotation(shootDir.normalized);
         }
 
         // ────────────────────────────────────────────────────────────
@@ -268,7 +428,6 @@ namespace OmiyaFes2026.Pose
             float pitch = Mathf.DeltaAngle(0f, relativeRotation.eulerAngles.x);
             float yaw   = Mathf.DeltaAngle(0f, relativeRotation.eulerAngles.y);
 
-            // normV の -1 はスクリーン座標系の Y 軸反転補正（常に必要）
             float normH =  Mathf.Clamp(yaw   / maxYawDeg,   -1f, 1f);
             float normV = -Mathf.Clamp(pitch  / maxPitchDeg, -1f, 1f);
 
@@ -304,6 +463,31 @@ namespace OmiyaFes2026.Pose
         }
 
         // ────────────────────────────────────────────────────────────
+        // 詳細デバッグログ
+        // ────────────────────────────────────────────────────────────
+
+        private void EmitVerboseDebugLog(Quaternion rawQuat, Quaternion convertedQuat, Quaternion relRotation)
+        {
+            int pktCount = _receiver != null ? _receiver.ReceivedPacketCount : 0;
+            Vector3 relEuler = DebugRelativeEuler;
+            Vector3 fwd = aimTarget != null ? aimTarget.forward : Vector3.forward;
+            Quaternion localRot = aimTarget != null ? aimTarget.localRotation : Quaternion.identity;
+
+            Debug.Log(
+                $"[PoseRotationDriver] 🔍 詳細デバッグ frame={_frameCount}\n" +
+                $"  ReceivedPacketCount    = {pktCount}\n" +
+                $"  screenFaceDown         = {(_receiver != null ? _receiver.ScreenFaceDown.ToString() : "N/A")}\n" +
+                $"  useArdCompatibleMode   = {useArdCompatibleMode}\n" +
+                $"  rawQuat                = ({rawQuat.x:F3}, {rawQuat.y:F3}, {rawQuat.z:F3}, {rawQuat.w:F3})\n" +
+                $"  convertedQuat          = ({convertedQuat.x:F3}, {convertedQuat.y:F3}, {convertedQuat.z:F3}, {convertedQuat.w:F3})\n" +
+                $"  hasCalibration         = {_hasCalibration}\n" +
+                $"  referenceSensorRot     = {_referenceSensorRotation.eulerAngles}\n" +
+                $"  relativeRotation Euler = pitch={relEuler.x:F1}° yaw={relEuler.y:F1}° roll={relEuler.z:F1}°\n" +
+                $"  aimTarget.localRot     = {localRot.eulerAngles}\n" +
+                $"  aimTarget.forward      = {fwd:F3}");
+        }
+
+        // ────────────────────────────────────────────────────────────
         // キャリブレーション
         // ────────────────────────────────────────────────────────────
 
@@ -312,7 +496,7 @@ namespace OmiyaFes2026.Pose
             _hasCalibration      = false;
             _calibrating         = false;
             _calibFrameCount     = 0;
-            _hasFilteredInput    = false; // フィルタ状態もリセット
+            _hasFilteredInput    = false;
             _positionInitialized = false;
             _targetLocalRotation = _initialLocalRotation;
 
@@ -322,10 +506,22 @@ namespace OmiyaFes2026.Pose
             if (_receiver != null)
                 _receiver.ClearPendingRotation();
 
-            Debug.Log("[PoseRotationDriver] 🔄 キャリブレーションリセット → 次のパケットから平均化開始");
+            Debug.Log("[PoseRotationDriver] 🔄 キャリブレーションリセット → 次のパケットから基準姿勢を設定");
         }
 
         public void Calibrate() => ResetCalibration();
+
+        /// <summary>
+        /// 実行時に外部から aimTarget を設定する（AimRootSetup などから使用）。
+        /// </summary>
+        public void SetAimTarget(Transform target)
+        {
+            aimTarget = target;
+            _initialLocalRotation = aimTarget != null ? aimTarget.localRotation : Quaternion.identity;
+            _targetLocalRotation  = _initialLocalRotation;
+            _aimTargetWarningEmitted = false;
+            Debug.Log($"[PoseRotationDriver] aimTarget を {(target != null ? target.name : "null")} に設定しました。");
+        }
 
         // ────────────────────────────────────────────────────────────
         // Gizmos

@@ -6,13 +6,20 @@ namespace OmiyaFes2026
     /// インク弾の飛翔・当たり判定・ペイント処理。
     ///
     /// ▼ UV 取得の優先順位
-    ///   1. MeshCollider → hit.textureCoord で正確に取得
-    ///   2. BoxCollider/SphereCollider → Physics.Raycast で着弾ワールド座標を取得し UV 近似
-    ///   3. すべて失敗 → 弾の現在ワールド座標から UV 近似
+    ///   1. MeshCollider → hit.textureCoord で「正確なUV」を取得
+    ///   2. BoxCollider/SphereCollider → Physics.Raycast 結果から BoundsPointToUV で「近似UV」を取得
+    ///   3. すべて失敗 → 弾の現在ワールド座標から「近似UV」を取得
+    ///
+    /// ▼ MeshCollider がない場合は Warning を出す（UV精度が落ちる）
     ///
     /// ▼ 側面ヒット防止
     ///   カメラに向いている面のみペイントする。
-    ///   着弾面の法線とカメラ→弾ベクトルが概ね逆向きなら「正面ヒット」と判定する。
+    ///
+    /// ▼ デバッグ情報
+    ///   着弾時に弾生成〜着弾の飛行時間、UV(正確/近似)、命中オブジェクトをログ出力する。
+    ///
+    /// NOTE: PaintTarget に正確な UV を得るには MeshCollider が必要。
+    ///       MeshCollider を Convex=false で設定し、Read/Write Enabled なメッシュを使うこと。
     /// </summary>
     public class InkBullet : MonoBehaviour
     {
@@ -41,6 +48,9 @@ namespace OmiyaFes2026
         private bool    _initialized = false;
         private bool    _hasHit      = false;
 
+        /// <summary>弾が生成された時刻（飛行時間計測用）</summary>
+        private float _spawnTime;
+
         // ────────────────────────────────────────────────────────────
         // 公開メソッド
         // ────────────────────────────────────────────────────────────
@@ -51,6 +61,7 @@ namespace OmiyaFes2026
             _color           = inkColor;
             brushPixelRadius = pixelRadius;
             _initialized     = true;
+            _spawnTime       = Time.time;
             Destroy(gameObject, lifetime);
         }
 
@@ -72,34 +83,46 @@ namespace OmiyaFes2026
             if (paintTarget == null) return;
 
             _hasHit = true;
+            float flightTime = Time.time - _spawnTime;
 
             // ── 側面ヒット判定 ──────────────────────────────────────
-            // Raycast で着弾面の法線を取得し、カメラに向いている面だけ塗る
             Ray ray = new Ray(transform.position - _direction * 0.5f, _direction);
-
             RaycastHit hitInfo;
-            bool gotHit = Physics.Raycast(ray, out hitInfo, 2f) && hitInfo.collider == other;
+            // QueryTriggerInteraction.Collide を指定しないと Trigger は無視される
+            bool gotHit = Physics.Raycast(ray, out hitInfo, 2f,
+                              Physics.DefaultRaycastLayers,
+                              QueryTriggerInteraction.Collide)
+                          && hitInfo.collider == other;
 
             if (ignoreSideHits && gotHit)
             {
-                // 着弾面の法線とカメラ前方のなす角が閾値を超えていたら側面 → スキップ
                 Camera cam = Camera.main;
                 Vector3 cameraForward = cam != null ? cam.transform.forward : Vector3.forward;
                 float angle = Vector3.Angle(-hitInfo.normal, cameraForward);
 
                 if (angle > frontFaceAngleThreshold)
                 {
-                    Debug.Log($"[InkBullet] 側面ヒット（angle={angle:F1}°）→ スキップ");
+                    Debug.Log($"[InkBullet] 側面ヒット（angle={angle:F1}°）→ スキップ（飛行時間={flightTime*1000f:F0}ms）");
                     Destroy(gameObject);
                     return;
                 }
             }
 
             // ── UV 取得 ──────────────────────────────────────────────
-            Vector2 uv = GetHitUV(other, gotHit ? hitInfo : (RaycastHit?)null);
+            bool exactUV = false;
+            Vector2 uv = GetHitUV(other, gotHit ? hitInfo : (RaycastHit?)null, out exactUV);
+
             paintTarget.Paint(uv, _color, brushPixelRadius);
 
-            Debug.Log($"[InkBullet] 命中！UV={uv} color={_color} pixelR={brushPixelRadius}");
+            // ── 着弾ログ ────────────────────────────────────────────
+            Debug.Log(
+                $"[InkBullet] 命中!\n" +
+                $"  object      = {other.name}\n" +
+                $"  UV          = {uv}  ({(exactUV ? "正確 (MeshCollider.textureCoord)" : "⚠ 近似 (BoundsPointToUV)")})\n" +
+                $"  color       = {_color}\n" +
+                $"  pixelRadius = {brushPixelRadius}\n" +
+                $"  flightTime  = {flightTime * 1000f:F0} ms");
+
             Destroy(gameObject);
         }
 
@@ -107,23 +130,44 @@ namespace OmiyaFes2026
         // 着弾点の UV 取得
         // ────────────────────────────────────────────────────────────
 
-        private Vector2 GetHitUV(Collider col, RaycastHit? cachedHit)
+        private Vector2 GetHitUV(Collider col, RaycastHit? cachedHit, out bool exactUV)
         {
+            exactUV = false;
             Ray ray = new Ray(transform.position - _direction * 0.5f, _direction);
 
             // ① MeshCollider があれば textureCoord で正確に取得
             var meshCol = col as MeshCollider ?? col.GetComponent<MeshCollider>();
             if (meshCol != null)
             {
-                if (meshCol.Raycast(ray, out RaycastHit mHit, 2f))
+                if (meshCol.Raycast(ray, out RaycastHit mHit, 3f))
+                {
+                    exactUV = true;
                     return mHit.textureCoord;
+                }
+                // MeshCollider はあるが Raycast 失敗（例: 凸包モード）
+                Debug.LogWarning(
+                    $"[InkBullet] ⚠ MeshCollider.Raycast に失敗しました ({col.name})。\n" +
+                    "BoundsPointToUV（近似UV）にフォールバックします。\n" +
+                    "Mesh を Read/Write Enabled にし、Convex=false の MeshCollider を設定してください。");
+            }
+            else
+            {
+                // MeshCollider がない → 精度が落ちる旨を警告
+                Debug.LogWarning(
+                    $"[InkBullet] ⚠ {col.name} に MeshCollider がありません。\n" +
+                    "UV は BoundsPointToUV（近似）を使います。\n" +
+                    "正確な UV 塗りには非凸 MeshCollider（Convex=false, Read/Write Enabled Mesh）が必要です。");
             }
 
             // ② Physics.Raycast 結果をキャッシュから利用（もしあれば）
             if (cachedHit.HasValue)
+            {
+                Debug.Log("[InkBullet] 近似UV: BoundsPointToUV（Raycastキャッシュあり）");
                 return BoundsPointToUV(col, cachedHit.Value.point);
+            }
 
             // ③ 最終フォールバック: 弾の現在位置から UV 近似
+            Debug.Log("[InkBullet] 近似UV: BoundsPointToUV（弾の現在位置から）");
             return BoundsPointToUV(col, transform.position);
         }
 

@@ -53,10 +53,12 @@ namespace OmiyaFes2026.Pose
         [SerializeField] private bool convertHandedness = true;
         [Tooltip("センサー→Unity の追加 Euler オフセット（通常 Vector3.zero）")]
         [SerializeField] private Vector3 sensorToUnityEulerOffset = Vector3.zero;
-        [Tooltip("スマホ画面を下向き（face-down）に持つ場合 true。照準デバイスのような持ち方。")]
-        [SerializeField] private bool screenFaceDown = false;
+        [Tooltip("スマホ画面を下向き（face-down）に持つ場合 true。\n" +
+                 "ARD互換・照準デバイス運用（銃を向けるように画面を伏せて持つ）では true 推奨。\n" +
+                 "false にすると画面上向き（通常スマホ持ち）として変換される。")]
+        [SerializeField] private bool screenFaceDown = true;
         [Tooltip("クォータニオンの半球ガタつきを安定化するか（推奨: true）")]
-        [SerializeField] private bool stabilizeQuaternionHemisphere = true;
+        [SerializeField] private bool stabilizeQuaternionHemisphere = false;
 
         [Header("デバッグ設定")]
         [Tooltip("ONにすると受信パケットの詳細をConsoleに出力する")]
@@ -329,7 +331,15 @@ namespace OmiyaFes2026.Pose
                 _receiveThread.Start();
 
                 lock (_lock) { LastStatus = $"Listening on UDP {port}"; }
-                Debug.Log($"[UdpQuaternionReceiver] 受信開始 port={port} (Socket直接バインド)");
+                Debug.Log(
+                    $"[UdpQuaternionReceiver] 起動設定\n" +
+                    $"  port                    = {port}\n" +
+                    $"  coordinatePreset        = {coordinatePreset}\n" +
+                    $"  convertHandedness       = {convertHandedness}\n" +
+                    $"  screenFaceDown          = {screenFaceDown}  ← ARD互換は true 推奨\n" +
+                    $"  sensorToUnityEulerOffset= {sensorToUnityEulerOffset}\n" +
+                    $"  stabilizeHemisphere     = {stabilizeQuaternionHemisphere}\n" +
+                    $"  ReceivedPacketCount     = {ReceivedPacketCount} (起動時点)");
             }
             catch (Exception ex)
             {

@@ -23,6 +23,11 @@ namespace OmiyaFes2026
         [Tooltip("着弾点を中心に塗るブラシのピクセル半径（例: 128 なら直径256px≈テクスチャの半分）")]
         [SerializeField] [Range(1, 256)] private int brushPixelRadius = 128;
 
+        [Tooltip("0 より大きい値を設定すると、InkBullet 側の brushPixelRadius を強制上書きする。\n" +
+                 "壁など『小さいスプラッター』にしたい場合に使用（例: 50）。\n" +
+                 "0 = 上書きなし（InkBullet 側の値をそのまま使う）")]
+        [SerializeField] [Range(0, 512)] private int forceBrushPixelRadius = 0;
+
         // ────────────────────────────────────────────────────────────
         // 内部フィールド
         // ────────────────────────────────────────────────────────────
@@ -67,8 +72,21 @@ namespace OmiyaFes2026
         /// <param name="pixelRadiusOverride">0以下なら Inspector の brushPixelRadius を使用</param>
         public void Paint(Vector2 uv, Color color, int pixelRadiusOverride = 0)
         {
-            int radius = pixelRadiusOverride > 0 ? pixelRadiusOverride : brushPixelRadius;
+            // 優先順位: forceBrushPixelRadius > pixelRadiusOverride > brushPixelRadius
+            int radius = forceBrushPixelRadius > 0
+                ? forceBrushPixelRadius
+                : (pixelRadiusOverride > 0 ? pixelRadiusOverride : brushPixelRadius);
             PaintPixels(_paintTexture, uv, color, radius);
+        }
+
+        /// <summary>
+        /// テクスチャ上のインクを全て消去する。
+        /// GameStateManager.OnReset から呼ばれる。
+        /// </summary>
+        public void ClearPaint()
+        {
+            if (_paintTexture != null)
+                ClearTexture();
         }
 
         // ────────────────────────────────────────────────────────────

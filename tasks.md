@@ -1,83 +1,76 @@
-# 2026OmiyaFes – タスク管理
+# OmiyaFes2026 タスク管理
 
-## ✅ 完了済み
-
-- [x] UDP 受信スクリプト（UdpQuaternionReceiver）の実装
-- [x] OSC/JSON/バイナリ全フォーマット対応パーサー
-- [x] キャリブレーション機能（Calibrate() / C キー）
-- [x] デバッグオーバーレイ（PoseDebugOverlay）
-- [x] ZIG SIM UDP 通信の疎通確認（ファイアウォール設定含む）
-- [x] GunAimVisualizer 新規作成（LineRenderer でレイをゲーム画面に表示）
-- [x] **ARD 完全移植（2026-05-05）**：
-  - `QuaternionCoordinateConverter` → LookRotation ベース・半球安定化・IosToUnity後方互換
-  - `QuaternionCalibrationUtility` → 新規作成（`CalculateRelativeRotation`）
-  - `UdpQuaternionReceiver` → `ConsumeLatestRotation` / `ClearPendingRotation` / `ConsumePendingRecenterRequest` / `StabilizeRawQuaternion` 追加・受信ループで `ConvertToUnity` 適用
-  - **[バグ修正]** `UdpQuaternionReceiver.Update()` が `_hasPending` を消費するバグを修正 → `ReceivedPacketCount` ベースの `IsReceiving` 判定に変更。`ConsumeLatestRotation()` 専用消費を確立。
-  - `LatestRawRotation` プロパティ追加（ARD互換エイリアス）
-  - タッチOSCメッセージ検出で `_pendingRecenterRequests` を Increment する処理追加
-  - `PoseRotationDriver` → ARD 方式（`initialLocalRotation * relativeRotation * modelOffset`）・autoCalibrateOnFirstPacket・rotationSmoothing・`ResetCalibration()`
-  - `PoseCalibrationCoordinator` → ARD 方式（ResetCalibration + ConsumePendingRecenterRequest）
-
-## 🔄 進行中
-
-- [ ] **Unity で実機確認**
-  - Inspector で `coordinatePreset = IPhoneCoreMotion`、`screenFaceDown = false` を確認
-  - ZIG SIM 接続 → ReceivedPacketCount が増えるか確認
-  - C キーでキャリブレーション → スマホを左右/上下に向けて aimTarget が追従するか
-  - `controlMode = RotateGun` が推奨（初回はこちらで挙動確認）
-  - **[済] 左右反転を修正** → `iPhoneRelativeAxisSigns = (1, -1, 1)`（Y軸のみ反転）
-  - **[済] AimDirectionLineVisualizer 追加**（forward方向をLineRendererで可視化）
-
-## 📋 未着手
-
-- [ ] インク弾の発射ロジック確認（InkGun の `aimTransform.forward` が正しく飛ぶか）
-- [ ] ペイント対象オブジェクトへのテクスチャ描画
-- [ ] スポーン管理（InkObjectSpawner の調整）
-- [ ] ゲームUI（スコア・残弾・タイマー）
-- [ ] BGM / SE
-- [ ] 最終動作確認・会場テスト
+## 最新状態（2026-05-06 12:39）
 
 ---
 
-## 📝 設計メモ
+## ⚠️ 絶対要件（変更禁止）
+> ユーザー指定: 2026-05-06 12:14
 
-### ARD 移植後の処理パイプライン（2026-05-05）
+**スマホの向き = ゲーム内の銃の向きを完全に一致させる。**
+- スマホを左に向ける → 銃も左を向く
+- 回転しただけで銃の「位置」が変わってはいけない
+- 実装モード: `DirectMapping`
+
+---
+
+## シーン設計
 
 ```
-ZIG SIM (UDP) → UdpQuaternionReceiver
-  └─ パース → StabilizeRawQuaternion（正規化・半球安定化）
-  └─ ConvertToUnity(IPhoneCoreMotion, LookRotationベース)
-  └─ LatestConvertedRotation / _pendingQuat（変換済み）
-        ↓
-PoseRotationDriver.Update()
-  └─ ConsumeLatestRotation() で変換済みQuat取得
-  └─ 初回 or リセット → referenceSensorRotation に保存
-  └─ CalculateRelativeRotation(ref, current) → 相対回転
-  └─ ApplyRelativeAxisPreset（iPhone軸補正: -1,-1,1）
-  └─ initialLocalRotation * relativeRotation * modelOffset
-  └─ aimTarget.localRotation に適用（Slerp or 即時）
-        ↓
-InkGun → aimTransform.forward で弾を発射
+カメラ(Z≈0)
+  ↓ 前方
+InkGun（手前）
+  ↓ 弾発射
+FloatingObj（中間）← 当たったらオブジェクトにインク
+  ↓ 外れたら
+BackgroundWall（奥）← 当たったら壁にインク
 ```
 
-### Inspector 推奨設定
+## 背景壁のセットアップ（Inspector のみ・コード不要）
 
-| 項目 | 推奨値 |
+**Hierarchy に Quad or Plane を配置 → Inspector で：**
+
+| コンポーネント | 設定 |
 |---|---|
-| `coordinatePreset` | `IPhoneCoreMotion` |
-| `screenFaceDown` | `false`（銃のような横向き持ち） |
-| `stabilizeQuaternionHemisphere` | `true` |
-| `autoCalibrateOnFirstPacket` | `true` |
-| `rotationSmoothing` | `0`（即時）〜`0.1`（滑らか） |
-| `iPhoneRelativeAxisSigns` | `(-1, -1, 1)`（ARD デフォルト） |
-| `controlMode` | `RotateGun`（まず確認） |
+| **Transform** | Z を奥に（例: `15`）・スケールを大きく |
+| **MeshCollider** または **BoxCollider** | `Is Trigger = ✅` |
+| **PaintTarget** | アタッチするだけ（自動でテクスチャ生成） |
 
-### 座標系変換（ARD 移植後）
+> ⚠️ コライダーは **Trigger** にすること（InkBulletはOnTriggerEnterでペイント）
+
+---
+
+## インクリセットの仕組み（今回実装済み）
+
 ```
-生 Quat → StabilizeRawQuaternion（w<0なら全符号反転）
-→ ConvertIPhoneCoreMotion:
-    deviceTop = RotateVector(q, Vector3.up)
-    deviceScreenOut = RotateVector(q, Vector3.forward)
-    → LookRotation(deviceTop.normalized, -deviceScreenOut.normalized)
-→ Euler オフセット適用
+GameStateManager.ResetGame()
+    ↓
+FindObjectsOfType<PaintTarget>()
+    ↓ 全PaintTargetを列挙（壁もオブジェクトも）
+pt.ClearPaint()  ← テクスチャを透明にクリア
 ```
+
+→ 壁・浮遊オブジェクト、どちらもゲームリセット時に同時にインクがきれいになる
+
+---
+
+## Inspector 設定（推奨値）
+
+### ZigSimReceiver > PoseRotationDriver
+| 項目 | 設定値 |
+|---|---|
+| **Control Mode** | **`Direct Mapping`** |
+| Use ARD Compatible Mode | ✅ ON |
+
+### InkGun
+| 項目 | 設定値 |
+|---|---|
+| **Fire Mode** | **`Projectile`** |
+| Fire Interval | `0.3` |
+
+## キー操作
+| キー | 機能 |
+|---|---|
+| Space | ゲーム開始 |
+| **C** | キャリブレーション（照準リセット） |
+| **R** | 強制リセット（スタッフ用） |
