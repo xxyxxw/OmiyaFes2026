@@ -34,6 +34,7 @@ namespace OmiyaFes2026.Pose
 
         private void Awake()
         {
+            // directionTransform 未設定なら自分の Transform にフォールバック
             if (directionTransform == null)
             {
                 directionTransform = transform;
@@ -127,6 +128,17 @@ namespace OmiyaFes2026.Pose
                     lineRenderer.sharedMaterial.SetColor("_Color", lineColor);
                 }
             }
+        }
+
+        // ────────────────────────────────────────────────────────────
+        // 実行時セッター（AimRootSetup などから使用）
+        // ────────────────────────────────────────────────────────────
+
+        /// <summary>実行時に外部から directionTransform を変更する。</summary>
+        public void SetDirectionTransform(Transform t)
+        {
+            directionTransform = t;
+            Debug.Log($"[AimDirectionLineVisualizer] directionTransform = {(t != null ? t.name : "null")}");
         }
     }
 }

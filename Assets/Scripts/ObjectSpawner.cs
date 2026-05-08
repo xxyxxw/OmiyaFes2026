@@ -21,8 +21,13 @@ namespace OmiyaFes2026
         [SerializeField] private float spawnYMin = -2f;
         [Tooltip("生成する Y 座標の最大値")]
         [SerializeField] private float spawnYMax =  2f;
-        [Tooltip("生成する Z 座標（カメラの正面に合わせて調整）")]
-        [SerializeField] private float spawnZ    =  0f;
+        [Tooltip("生成する Z 座標の最小値（手前）")]
+        [SerializeField] private float spawnZMin =  0f;
+        [Tooltip("生成する Z 座標の最大値（奥）")]
+        [SerializeField] private float spawnZMax = 10f;
+
+        [Tooltip("この X 座標を下回ったらオブジェクトを削除（小さいほど長く残る）")]
+        [SerializeField] private float destroyX = -24f;
 
         [Header("移動速度（Units/秒）")]
         [SerializeField] private float moveSpeedMin = 2f;
@@ -143,8 +148,9 @@ namespace OmiyaFes2026
 
             // ── 位置・サイズ設定 ──────────────────────────────────
             float y    = Random.Range(spawnYMin, spawnYMax);
+            float z    = Random.Range(spawnZMin, spawnZMax);
             float size = Random.Range(sizeMin, sizeMax);
-            go.transform.position   = new Vector3(spawnX, y, spawnZ);
+            go.transform.position   = new Vector3(spawnX, y, z);
             go.transform.localScale = Vector3.one * size;
             go.name  = $"FloatingObj_{type}_{_spawnedObjects.Count}";
             go.layer = paintTargetLayer;
@@ -181,12 +187,12 @@ namespace OmiyaFes2026
 
             float speed = Random.Range(moveSpeedMin, moveSpeedMax);
             var floater = go.AddComponent<FloatingObject>();
-            floater.Initialize(speed);
+            floater.Initialize(speed, destroyX);
 
             // 追跡リストに追加
             _spawnedObjects.Add(go);
 
-            Debug.Log($"[ObjectSpawner] {type} 生成 (y={y:F1}, size={size:F1}, speed={speed:F1})");
+            Debug.Log($"[ObjectSpawner] {type} 生成 (y={y:F1}, z={z:F1}, size={size:F1}, speed={speed:F1})");
         }
     }
 }

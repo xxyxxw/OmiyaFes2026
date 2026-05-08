@@ -240,6 +240,7 @@ namespace OmiyaFes2026
             // aim.forward = スマホの向き（DirectMappingモード）= 弾の飛ぶ方向
             Vector3 direction = aim.forward;
 
+            SoundManager.Instance?.PlayShoot();
             SpawnBullet(origin, direction);
         }
 

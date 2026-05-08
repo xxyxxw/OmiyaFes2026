@@ -96,6 +96,18 @@ namespace OmiyaFes2026
                 Debug.LogWarning("[AimRootSetup] ⚠ InkGun が見つかりません。手動で接続してください。");
             }
 
+            // ── 5. AimDirectionLineVisualizer に接続 ───────────────────
+            var lineViz = FindObjectOfType<AimDirectionLineVisualizer>();
+            if (lineViz != null)
+            {
+                lineViz.SetDirectionTransform(aimRoot);
+                Debug.Log($"[AimRootSetup] AimDirectionLineVisualizer.directionTransform = {aimRoot.name}");
+            }
+            else
+            {
+                Debug.LogWarning("[AimRootSetup] ⚠ AimDirectionLineVisualizer が見つかりません。ラインは表示されますが方向が固定になります。");
+            }
+
             Debug.Log(
                 "[AimRootSetup] ✅ セットアップ完了\n" +
                 $"  AimRoot     = {aimRoot.name}\n" +

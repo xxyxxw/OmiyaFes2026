@@ -77,6 +77,10 @@ namespace OmiyaFes2026.Pose
         [Tooltip("上下が反転しているときにON")]
         [SerializeField] private bool invertUpDown = false;
 
+        [Header("感度（DirectMapping モード用）")]
+        [Tooltip("スマホの傾き角度に掛ける倍率。1.0=1:1、2.0=2倍感度。スマホを少し動かしても大きく動かしたい場合は大きくする。")]
+        [SerializeField] [Range(0.1f, 5f)] private float sensitivityScale = 1.0f;
+
         [Header("感度（MoveCrosshair モード用）")]
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityH = 3.0f;
         [SerializeField] [Range(0.1f, 10f)] private float sensitivityV = 3.0f;
@@ -329,9 +333,27 @@ namespace OmiyaFes2026.Pose
 
         private void ApplyDirectMapping(Quaternion relativeRotation)
         {
+            // ── 感度スケール適用 ────────────────────────────────────────
+            // sensitivityScale = 1.0 のとき 1:1（そのまま）
+            // sensitivityScale = 2.0 のときスマホを30度傾けると銃が60度動く
+            Quaternion scaledRotation;
+            if (Mathf.Approximately(sensitivityScale, 1f))
+            {
+                scaledRotation = relativeRotation;
+            }
+            else
+            {
+                // Euler角でYaw/Pitchに倍率を掛けてからQuaternionに戻す
+                Vector3 eu    = relativeRotation.eulerAngles;
+                float pitch   = Mathf.DeltaAngle(0f, eu.x) * sensitivityScale;
+                float yaw     = Mathf.DeltaAngle(0f, eu.y) * sensitivityScale;
+                float roll    = Mathf.DeltaAngle(0f, eu.z); // Rollは倍率なし
+                scaledRotation = Quaternion.Euler(pitch, yaw, roll);
+            }
+
             Quaternion modelOffsetRot = Quaternion.Euler(modelEulerOffset);
-            // 初期姿勢 × 相対回転 × モデル補正 → localRotation に直接適用
-            aimTarget.localRotation = _initialLocalRotation * relativeRotation * modelOffsetRot;
+            // 初期姿勢 × スケール済み相対回転 × モデル補正 → localRotation に直接適用
+            aimTarget.localRotation = _initialLocalRotation * scaledRotation * modelOffsetRot;
             // _targetLocalRotation も更新（ResetCalibration で参照される）
             _targetLocalRotation = aimTarget.localRotation;
         }

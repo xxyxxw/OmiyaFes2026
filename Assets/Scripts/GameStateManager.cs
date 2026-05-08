@@ -222,6 +222,15 @@ namespace OmiyaFes2026
             if (allTargets.Length > 0)
                 Debug.Log($"[GameStateManager] インクリセット: {allTargets.Length} 個の PaintTarget をクリアしました");
 
+            // ── 背景の BackgroundPaintTarget もリセット ───────────────
+            // BackgroundPaintTarget は背景画像に戻る（透明クリアではない）
+            BackgroundPaintTarget[] bgTargets = FindObjectsOfType<BackgroundPaintTarget>();
+            foreach (var bt in bgTargets)
+                bt.ClearPaint();
+
+            if (bgTargets.Length > 0)
+                Debug.Log($"[GameStateManager] 背景インクリセット: {bgTargets.Length} 個の BackgroundPaintTarget をクリアしました");
+
             Debug.Log("[GameStateManager] リセット → 待機状態");
         }
     }

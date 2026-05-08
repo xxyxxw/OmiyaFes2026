@@ -79,8 +79,14 @@ namespace OmiyaFes2026
         {
             if (_hasHit) return;
 
-            var paintTarget = other.GetComponent<PaintTarget>();
-            if (paintTarget == null) return;
+            // ── PaintTarget または BackgroundPaintTarget を取得 ───────
+            // 浮遊オブジェクト → PaintTarget
+            // 背景 Quad      → BackgroundPaintTarget
+            var paintTarget   = other.GetComponent<PaintTarget>();
+            var bgPaintTarget = other.GetComponent<BackgroundPaintTarget>();
+
+            // どちらも付いていなければスキップ
+            if (paintTarget == null && bgPaintTarget == null) return;
 
             _hasHit = true;
             float flightTime = Time.time - _spawnTime;
@@ -112,12 +118,20 @@ namespace OmiyaFes2026
             bool exactUV = false;
             Vector2 uv = GetHitUV(other, gotHit ? hitInfo : (RaycastHit?)null, out exactUV);
 
-            paintTarget.Paint(uv, _color, brushPixelRadius);
+            SoundManager.Instance?.PlayHit();
+
+            // ── ペイント実行（どちらのターゲットにも対応） ─────────────
+            if (paintTarget != null)
+                paintTarget.Paint(uv, _color, brushPixelRadius);
+            else
+                bgPaintTarget.Paint(uv, _color, brushPixelRadius);
+
+            string targetType = paintTarget != null ? "PaintTarget" : "BackgroundPaintTarget";
 
             // ── 着弾ログ ────────────────────────────────────────────
             Debug.Log(
                 $"[InkBullet] 命中!\n" +
-                $"  object      = {other.name}\n" +
+                $"  object      = {other.name} ({targetType})\n" +
                 $"  UV          = {uv}  ({(exactUV ? "正確 (MeshCollider.textureCoord)" : "⚠ 近似 (BoundsPointToUV)")})\n" +
                 $"  color       = {_color}\n" +
                 $"  pixelRadius = {brushPixelRadius}\n" +
